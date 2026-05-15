@@ -1,0 +1,108 @@
+plugins:
+  live_metrics_enabled:
+    default: true
+    client: true
+
+  live_metrics_nav_enabled:
+    default: true
+    client: true
+
+  live_metrics_require_login_to_view_page:
+    default: true
+    client: false
+
+  live_metrics_allow_anonymous_public_view:
+    default: false
+    client: false
+
+  live_metrics_directory_enabled:
+    default: true
+    client: true
+
+  live_metrics_directory_limit:
+    default: 50
+    type: integer
+    min: 1
+    max: 200
+    client: false
+
+  live_metrics_poll_interval_seconds:
+    default: 6
+    type: integer
+    min: 3
+    max: 60
+    client: true
+
+  live_metrics_api_cache_seconds:
+    default: 3
+    type: integer
+    min: 1
+    max: 30
+    client: false
+
+  live_metrics_live_threshold_seconds:
+    default: 12
+    type: integer
+    min: 3
+    max: 120
+    client: false
+
+  live_metrics_stale_threshold_seconds:
+    default: 60
+    type: integer
+    min: 10
+    max: 600
+    client: false
+
+  live_metrics_statistics_enabled:
+    default: false
+    client: true
+
+  live_metrics_pulsoid_enabled:
+    default: true
+    client: true
+
+  live_metrics_pulsoid_client_id:
+    default: ""
+    type: string
+    client: false
+
+  live_metrics_pulsoid_client_secret:
+    default: ""
+    type: string
+    client: false
+
+  live_metrics_pulsoid_authorize_url:
+    default: "https://pulsoid.net/oauth2/authorize"
+    type: string
+    client: false
+
+  live_metrics_pulsoid_token_url:
+    default: "https://pulsoid.net/oauth2/token"
+    type: string
+    client: false
+
+  live_metrics_pulsoid_revoke_url:
+    default: "https://dev.pulsoid.net/oauth2/revoke"
+    type: string
+    client: false
+
+  live_metrics_pulsoid_latest_url:
+    default: "https://dev.pulsoid.net/api/v1/data/heart_rate/latest"
+    type: string
+    client: false
+
+  live_metrics_pulsoid_statistics_url:
+    default: "https://dev.pulsoid.net/api/v1/statistics"
+    type: string
+    client: false
+
+  live_metrics_pulsoid_profile_url:
+    default: "https://pulsoid.net/api/v1/profile"
+    type: string
+    client: false
+
+  live_metrics_pulsoid_redirect_uri_override:
+    default: ""
+    type: string
+    client: false
