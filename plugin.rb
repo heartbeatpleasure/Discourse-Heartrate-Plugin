@@ -39,6 +39,12 @@ after_initialize do
   Discourse::Application.routes.append do
     get "/live-metrics" => "live_metrics/page#index"
 
+    # Keep an API-prefixed connect alias because /live-metrics/api/* is known to
+    # route correctly on Discourse installs where deeper frontend page paths may
+    # be claimed by the Ember fallback before OAuth can start. The legacy auth
+    # path stays available for backwards compatibility and as the registered
+    # OAuth callback path.
+    get "/live-metrics/api/connect/pulsoid" => "live_metrics/auth#pulsoid_start"
     get "/live-metrics/auth/pulsoid/start" => "live_metrics/auth#pulsoid_start"
     get "/live-metrics/auth/pulsoid/callback" => "live_metrics/auth#pulsoid_callback"
     delete "/live-metrics/auth/pulsoid" => "live_metrics/auth#pulsoid_disconnect", defaults: { format: :json }

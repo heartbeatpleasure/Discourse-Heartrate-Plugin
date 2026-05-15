@@ -4,17 +4,25 @@ module ::LiveMetrics
   class AuthController < ::ApplicationController
     requires_plugin ::LiveMetrics::PLUGIN_NAME
 
+    skip_before_action :check_xhr, raise: false
+
     before_action :ensure_enabled
     before_action :ensure_logged_in
 
     def pulsoid_start
       unless ::LiveMetrics::PulsoidClient.configured?
-        return redirect_to "/live-metrics?error=pulsoid_not_configured"
+        return redirect_to live_metrics_page_url(error: "pulsoid_not_configured")
       end
 
       state = SecureRandom.hex(32)
       session[:live_metrics_pulsoid_oauth_state] = state
-      redirect_to ::LiveMetrics::PulsoidClient.authorization_url(state: state)
+
+      # OAuth must leave the Discourse host. On newer Rails/Discourse builds,
+      # external redirects require allow_other_host to avoid a hard error page.
+      redirect_to ::LiveMetrics::PulsoidClient.authorization_url(state: state), allow_other_host: true
+    rescue => e
+      Rails.logger.warn("[live_metrics] Pulsoid OAuth start failed user_id=#{current_user&.id} error=#{e.class}: #{e.message}")
+      redirect_to live_metrics_page_url(error: "pulsoid_connect_failed")
     end
 
     def pulsoid_callback
@@ -23,19 +31,19 @@ module ::LiveMetrics
       code = params[:code].to_s
 
       if expected_state.blank? || expected_state.bytesize != received_state.bytesize || !ActiveSupport::SecurityUtils.secure_compare(expected_state, received_state)
-        return redirect_to "/live-metrics?error=oauth_state_mismatch"
+        return redirect_to live_metrics_page_url(error: "oauth_state_mismatch")
       end
 
       if params[:error].present?
-        return redirect_to "/live-metrics?error=#{ERB::Util.url_encode(params[:error].to_s)}"
+        return redirect_to live_metrics_page_url(error: params[:error].to_s)
       end
 
       if code.blank?
-        return redirect_to "/live-metrics?error=missing_authorization_code"
+        return redirect_to live_metrics_page_url(error: "missing_authorization_code")
       end
 
       unless provider_accounts_table_ready?
-        return redirect_to "/live-metrics?error=database_not_ready"
+        return redirect_to live_metrics_page_url(error: "database_not_ready")
       end
 
       token_payload = ::LiveMetrics::PulsoidClient.exchange_code!(code: code)
@@ -59,10 +67,10 @@ module ::LiveMetrics
         account.save!
       end
 
-      redirect_to "/live-metrics?connected=pulsoid"
+      redirect_to live_metrics_page_url(connected: "pulsoid")
     rescue => e
       Rails.logger.warn("[live_metrics] Pulsoid OAuth callback failed user_id=#{current_user&.id} error=#{e.class}: #{e.message}")
-      redirect_to "/live-metrics?error=pulsoid_connect_failed"
+      redirect_to live_metrics_page_url(error: "pulsoid_connect_failed")
     end
 
     def pulsoid_disconnect
@@ -87,6 +95,13 @@ module ::LiveMetrics
 
     def ensure_enabled
       raise Discourse::NotFound unless SiteSetting.live_metrics_enabled && SiteSetting.live_metrics_pulsoid_enabled
+    end
+
+    def live_metrics_page_url(query = {})
+      query = query.compact_blank if query.respond_to?(:compact_blank)
+      return "/live-metrics" if query.blank?
+
+      "/live-metrics?#{query.to_query}"
     end
 
     def provider_accounts_table_ready?

@@ -25,7 +25,7 @@ module ::LiveMetrics
           pulsoid: {
             enabled: SiteSetting.live_metrics_pulsoid_enabled,
             configured: ::LiveMetrics::PulsoidClient.configured?,
-            connect_url: "/live-metrics/auth/pulsoid/start"
+            connect_url: "/live-metrics/api/connect/pulsoid"
           }
         },
         visibility_options: visibility_options
