@@ -5,7 +5,8 @@ module ::LiveMetrics
     self.table_name = "live_metrics_provider_accounts"
 
     PROVIDER_PULSOID = "pulsoid"
-    PROVIDERS = [PROVIDER_PULSOID]
+    PROVIDER_HYPERATE = "hyperate"
+    PROVIDERS = [PROVIDER_PULSOID, PROVIDER_HYPERATE]
     VISIBILITIES = %w[private logged_in public staff]
 
     belongs_to :user
@@ -13,8 +14,11 @@ module ::LiveMetrics
     validates :provider, presence: true, inclusion: { in: PROVIDERS }
     validates :visibility, presence: true, inclusion: { in: VISIBILITIES }
     validates :user_id, uniqueness: { scope: :provider }
+    validates :provider_uid, presence: true, if: :hyperate?
 
     scope :pulsoid, -> { where(provider: PROVIDER_PULSOID) }
+    scope :hyperate, -> { where(provider: PROVIDER_HYPERATE) }
+    scope :enabled_providers, -> { where(provider: ::LiveMetrics.enabled_provider_names) }
     scope :directory_enabled, -> { where(show_in_directory: true) }
     scope :profile_enabled, -> { where(show_on_profile: true) }
 
@@ -45,11 +49,21 @@ module ::LiveMetrics
     end
 
     def connected?
-      access_token_cipher.present? && refresh_token_cipher.present?
+      if pulsoid?
+        access_token_cipher.present? && refresh_token_cipher.present?
+      elsif hyperate?
+        provider_uid.present?
+      else
+        false
+      end
     end
 
     def pulsoid?
       provider == PROVIDER_PULSOID
+    end
+
+    def hyperate?
+      provider == PROVIDER_HYPERATE
     end
 
     def token_refresh_recommended?

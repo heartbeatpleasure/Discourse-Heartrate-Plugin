@@ -2,7 +2,7 @@ en:
   site_settings:
     live_metrics_enabled: "Enable the Heartrate plugin."
     live_metrics_nav_enabled: "Show a Heartrate navigation item when the theme component is installed."
-    live_metrics_require_login_to_view_page: "Require login for the Heartrate page and directory API. Recommended for the proof of concept."
+    live_metrics_require_login_to_view_page: "Require login for the Heartrate page and directory API. Recommended when sharing live heart-rate data."
     live_metrics_allow_anonymous_public_view: "Allow anonymous users to view accounts marked public. Keep disabled unless you intentionally want public heart-rate visibility."
     live_metrics_directory_enabled: "Enable the Heartrate overview/directory."
     live_metrics_directory_limit: "Maximum number of accounts shown in the Heartrate directory."
@@ -21,3 +21,7 @@ en:
     live_metrics_pulsoid_statistics_url: "Pulsoid statistics API URL."
     live_metrics_pulsoid_profile_url: "Pulsoid profile API URL."
     live_metrics_pulsoid_redirect_uri_override: "Optional exact Pulsoid OAuth redirect URI override. Leave blank to use /live-metrics/auth/pulsoid/callback on this site."
+    live_metrics_hyperate_enabled: "Enable HypeRate as a provider for Heartrate."
+    live_metrics_hyperate_api_key: "HypeRate API key. Keep this server-side only; users only enter their HypeRate device ID."
+    live_metrics_hyperate_ws_url: "HypeRate WebSocket base URL."
+    live_metrics_hyperate_read_timeout_seconds: "Maximum seconds a request may wait for a HypeRate WebSocket heart-rate update."

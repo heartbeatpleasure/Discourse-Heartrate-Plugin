@@ -10,6 +10,15 @@ enabled_site_setting :live_metrics_enabled
 
 module ::LiveMetrics
   PLUGIN_NAME = "Discourse-Heartrate-Plugin"
+
+  def self.enabled_provider_names
+    providers = []
+    providers << ::LiveMetrics::ProviderAccount::PROVIDER_PULSOID if SiteSetting.live_metrics_pulsoid_enabled
+    providers << ::LiveMetrics::ProviderAccount::PROVIDER_HYPERATE if SiteSetting.live_metrics_hyperate_enabled
+    providers
+  rescue
+    []
+  end
 end
 
 after_initialize do
@@ -23,6 +32,8 @@ after_initialize do
       :authorization,
       :cookie,
       :state,
+      :api_key,
+      :device_id,
     ]
   rescue
     # Keep plugin boot resilient if Rails filter configuration is unavailable.
@@ -30,6 +41,7 @@ after_initialize do
 
   require_relative "lib/live_metrics/token_cipher"
   require_relative "lib/live_metrics/pulsoid_client"
+  require_relative "lib/live_metrics/hyperate_client"
 
   require_dependency File.expand_path("app/models/live_metrics/provider_account.rb", __dir__)
   require_dependency File.expand_path("app/controllers/live_metrics/page_controller.rb", __dir__)
@@ -49,10 +61,16 @@ after_initialize do
     get "/live-metrics/auth/pulsoid/callback" => "live_metrics/auth#pulsoid_callback"
     delete "/live-metrics/auth/pulsoid" => "live_metrics/auth#pulsoid_disconnect", defaults: { format: :json }
 
+    put "/live-metrics/api/connect/hyperate" => "live_metrics/api#connect_hyperate", defaults: { format: :json }
+    patch "/live-metrics/api/connect/hyperate" => "live_metrics/api#connect_hyperate", defaults: { format: :json }
+    delete "/live-metrics/api/connect/hyperate" => "live_metrics/api#disconnect_hyperate", defaults: { format: :json }
+
     get "/live-metrics/api/config" => "live_metrics/api#plugin_config", defaults: { format: :json }
     get "/live-metrics/api/me" => "live_metrics/api#me", defaults: { format: :json }
     put "/live-metrics/api/me/settings" => "live_metrics/api#update_me", defaults: { format: :json }
     patch "/live-metrics/api/me/settings" => "live_metrics/api#update_me", defaults: { format: :json }
+    put "/live-metrics/api/accounts/:provider/settings" => "live_metrics/api#update_account", defaults: { format: :json }
+    patch "/live-metrics/api/accounts/:provider/settings" => "live_metrics/api#update_account", defaults: { format: :json }
     get "/live-metrics/api/directory" => "live_metrics/api#directory", defaults: { format: :json }
     get "/live-metrics/api/users/:username" => "live_metrics/api#user", defaults: { format: :json }
   end

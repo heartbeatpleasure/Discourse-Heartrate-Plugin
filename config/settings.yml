@@ -106,3 +106,25 @@ plugins:
     default: ""
     type: string
     client: false
+
+  live_metrics_hyperate_enabled:
+    default: false
+    client: true
+
+  live_metrics_hyperate_api_key:
+    default: ""
+    type: string
+    client: false
+
+  live_metrics_hyperate_ws_url:
+    default: "wss://app.hyperate.io/ws"
+    type: string
+    client: false
+
+  live_metrics_hyperate_read_timeout_seconds:
+    default: 4
+    type: integer
+    min: 2
+    max: 10
+    client: false
+
