@@ -30,12 +30,17 @@ module ::LiveMetrics
       received_state = params[:state].to_s
       code = params[:code].to_s
 
-      if expected_state.blank? || expected_state.bytesize != received_state.bytesize || !ActiveSupport::SecurityUtils.secure_compare(expected_state, received_state)
-        return redirect_to live_metrics_page_url(error: "oauth_state_mismatch")
+      # Pulsoid may return OAuth errors such as invalid_scope before it echoes
+      # state back. Surface the provider error first so we do not mask the real
+      # problem as a generic state mismatch. Successful callbacks still require
+      # an exact state match before exchanging the authorization code.
+      if params[:error].present?
+        Rails.logger.warn("[live_metrics] Pulsoid OAuth returned error user_id=#{current_user&.id} error=#{params[:error]} description=#{params[:error_description]}")
+        return redirect_to live_metrics_page_url(error: safe_oauth_error(params[:error].to_s))
       end
 
-      if params[:error].present?
-        return redirect_to live_metrics_page_url(error: params[:error].to_s)
+      if expected_state.blank? || received_state.blank? || expected_state.bytesize != received_state.bytesize || !ActiveSupport::SecurityUtils.secure_compare(expected_state, received_state)
+        return redirect_to live_metrics_page_url(error: "oauth_state_mismatch")
       end
 
       if code.blank?
@@ -95,6 +100,11 @@ module ::LiveMetrics
 
     def ensure_enabled
       raise Discourse::NotFound unless SiteSetting.live_metrics_enabled && SiteSetting.live_metrics_pulsoid_enabled
+    end
+
+    def safe_oauth_error(value)
+      sanitized = value.to_s.downcase.gsub(/[^a-z0-9_\-]/, "_")
+      sanitized.present? ? sanitized.truncate(80, omission: "") : "oauth_error"
     end
 
     def live_metrics_page_url(query = {})

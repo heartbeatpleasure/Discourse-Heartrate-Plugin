@@ -6,7 +6,7 @@ require "json"
 
 module ::LiveMetrics
   class PulsoidClient
-    DEFAULT_SCOPES = %w[data:heart_rate:read profile:read]
+    DEFAULT_SCOPES = %w[data:heart_rate:read]
     STATISTICS_SCOPE = "data:statistics:read"
     USER_AGENT = "Discourse Heartrate Pulsoid PoC/0.1"
 
@@ -48,7 +48,7 @@ module ::LiveMetrics
         response_type: "code",
         client_id: SiteSetting.live_metrics_pulsoid_client_id,
         redirect_uri: redirect_uri,
-        scope: scopes.join(" "),
+        scope: scopes.join(","),
         state: state
       )
       uri.to_s
@@ -142,9 +142,25 @@ module ::LiveMetrics
       account.access_token = payload.fetch("access_token")
       account.refresh_token = payload.fetch("refresh_token")
       account.token_expires_at = Time.zone.now + payload.fetch("expires_in").to_i.seconds
-      account.scopes = scopes.join(" ")
+      account.scopes = scopes_from_token_payload(payload).join(" ")
       account.last_error = nil
       account
+    end
+
+    def self.scopes_from_token_payload(payload)
+      raw_scopes = payload["scopes"].presence || payload["scope"].presence
+
+      parsed =
+        case raw_scopes
+        when Array
+          raw_scopes
+        when String
+          raw_scopes.split(/[\s,]+/)
+        else
+          scopes
+        end
+
+      parsed.map(&:to_s).map(&:strip).reject(&:blank?).uniq
     end
 
     def self.with_refreshed_token(account)
