@@ -11,8 +11,9 @@ require "uri"
 
 module ::LiveMetrics
   class HypeRateClient
-    USER_AGENT = "Discourse Heartrate HypeRate PoC/0.1"
+    USER_AGENT = "Discourse Heartrate HypeRate/0.1"
     DEFAULT_WS_URL = "wss://app.hyperate.io/ws"
+    DEFAULT_ORIGIN = "https://app.hyperate.io"
     MAX_DEVICE_ID_LENGTH = 128
 
     class Error < StandardError
@@ -57,7 +58,7 @@ module ::LiveMetrics
       end
     rescue Unauthorized => e
       account.update_columns(last_error: "unauthorized", updated_at: Time.zone.now) rescue nil
-      { status: "unauthorized", heart_rate: nil, measured_at: nil, measured_at_ms: nil, error: e.message }
+      { status: "unauthorized", heart_rate: nil, measured_at: nil, measured_at_ms: nil, error: unauthorized_message(e) }
     rescue NoHeartRateData => e
       { status: "no_data", heart_rate: nil, measured_at: nil, measured_at_ms: nil, error: e.message }
     rescue => e
@@ -89,6 +90,12 @@ module ::LiveMetrics
 
           payload = parse_json(message)
           event = payload["event"].to_s
+
+          if event == "phx_reply" && payload.dig("payload", "status").to_s == "error"
+            reason = payload.dig("payload", "response", "reason").presence || payload.dig("payload", "response", "message").presence || "HypeRate rejected the channel join."
+            raise Unauthorized.new(reason) if reason.to_s.match?(/auth|token|unauthor|forbid|reject|invalid/i)
+            raise NoHeartRateData.new(reason.to_s)
+          end
 
           if event == "hr_update"
             heart_rate = payload.dig("payload", "hr")
@@ -156,6 +163,7 @@ module ::LiveMetrics
         "Connection: Upgrade",
         "Sec-WebSocket-Key: #{key}",
         "Sec-WebSocket-Version: 13",
+        "Origin: #{DEFAULT_ORIGIN}",
         "User-Agent: #{USER_AGENT}",
         "",
         ""
@@ -288,6 +296,12 @@ module ::LiveMetrics
       JSON.parse(body.to_s.presence || "{}")
     rescue JSON::ParserError
       {}
+    end
+
+    def self.unauthorized_message(error)
+      status = error.respond_to?(:status) ? error.status : nil
+      detail = status.present? ? " (HTTP #{status})" : ""
+      "HypeRate rejected the API key or device ID#{detail}. Check the Heartrate HypeRate settings and the user's HypeRate device ID."
     end
 
     def self.safe_body(body)
