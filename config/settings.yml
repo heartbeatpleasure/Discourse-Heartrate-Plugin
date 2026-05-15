@@ -117,7 +117,7 @@ plugins:
     client: false
 
   live_metrics_hyperate_ws_url:
-    default: "wss://app.hyperate.io/ws"
+    default: "wss://app.hyperate.io/socket/websocket"
     type: string
     client: false
 

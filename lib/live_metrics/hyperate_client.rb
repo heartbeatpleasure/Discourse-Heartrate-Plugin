@@ -12,7 +12,10 @@ require "uri"
 module ::LiveMetrics
   class HypeRateClient
     USER_AGENT = "Discourse Heartrate HypeRate/0.1"
-    DEFAULT_WS_URL = "wss://app.hyperate.io/ws"
+    DEFAULT_WS_URL = "wss://app.hyperate.io/socket/websocket"
+    DEVICE_PATH_WS_URL = "wss://app.hyperate.io/ws"
+    LEGACY_SOCKET_PATH = "/socket/websocket"
+    DEVICE_SOCKET_PATH = "/ws"
     DEFAULT_ORIGIN = "https://app.hyperate.io"
     MAX_DEVICE_ID_LENGTH = 128
 
@@ -67,22 +70,37 @@ module ::LiveMetrics
     end
 
     def self.read_latest_heart_rate(device_id)
+      last_error = nil
+
+      websocket_uri_candidates(device_id).each do |candidate|
+        begin
+          return read_latest_heart_rate_from_uri(device_id, candidate)
+        rescue Unauthorized, Error => e
+          last_error = e
+          Rails.logger.warn("[live_metrics] HypeRate WebSocket candidate failed endpoint=#{candidate[:name]} status=#{e.respond_to?(:status) ? e.status : nil} error=#{e.class}: #{e.message}")
+          next if fallback_allowed_for?(e)
+          raise
+        rescue NoHeartRateData => e
+          last_error = e
+          # If the socket opened successfully but did not produce a heart-rate
+          # update, another endpoint is unlikely to help. Keep this as a clean
+          # no-data state rather than presenting it as an authorization error.
+          raise
+        end
+      end
+
+      raise(last_error || NoHeartRateData.new("No HypeRate heart-rate update was received."))
+    end
+
+    def self.read_latest_heart_rate_from_uri(device_id, candidate)
       timeout_seconds = SiteSetting.live_metrics_hyperate_read_timeout_seconds.to_i
       timeout_seconds = 4 if timeout_seconds <= 0
       deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout_seconds
       socket = nil
 
       Timeout.timeout(timeout_seconds + 2) do
-        socket = open_socket(device_id)
-        send_text_frame(
-          socket,
-          {
-            topic: "hr:#{device_id}",
-            event: "phx_join",
-            payload: {},
-            ref: "1"
-          }.to_json
-        )
+        socket = open_socket(candidate[:uri])
+        send_text_frame(socket, join_message(device_id))
 
         loop do
           message = read_message(socket, deadline)
@@ -107,15 +125,7 @@ module ::LiveMetrics
       raise NoHeartRateData.new("No HypeRate heart-rate update was received before the request timed out.")
     ensure
       begin
-        send_text_frame(
-          socket,
-          {
-            topic: "hr:#{device_id}",
-            event: "phx_leave",
-            payload: {},
-            ref: Time.now.to_i.to_s
-          }.to_json
-        ) if socket
+        send_text_frame(socket, leave_message(device_id)) if socket
       rescue
         nil
       end
@@ -138,8 +148,7 @@ module ::LiveMetrics
       }
     end
 
-    def self.open_socket(device_id)
-      uri = websocket_uri(device_id)
+    def self.open_socket(uri)
       tcp = Socket.tcp(uri.host, uri.port || 443, connect_timeout: SiteSetting.live_metrics_hyperate_read_timeout_seconds.to_i.clamp(2, 10))
 
       socket = tcp
@@ -191,12 +200,72 @@ module ::LiveMetrics
       raise
     end
 
-    def self.websocket_uri(device_id)
-      base = SiteSetting.live_metrics_hyperate_ws_url.to_s.strip.presence || DEFAULT_WS_URL
-      base = DEFAULT_WS_URL unless base.start_with?("wss://", "ws://")
-      uri = URI.parse(base.chomp("/") + "/#{CGI.escape(device_id)}")
-      uri.query = URI.encode_www_form(token: SiteSetting.live_metrics_hyperate_api_key.to_s.strip)
+    def self.websocket_uri_candidates(device_id)
+      configured_base = SiteSetting.live_metrics_hyperate_ws_url.to_s.strip
+      bases = []
+      bases << configured_base if configured_base.present?
+      bases << DEFAULT_WS_URL
+      bases << DEVICE_PATH_WS_URL
+
+      bases
+        .compact
+        .map(&:strip)
+        .select { |base| base.start_with?("wss://", "ws://") }
+        .uniq
+        .map { |base| { name: endpoint_name(base), uri: websocket_uri_for_base(base, device_id) } }
+    end
+
+    def self.websocket_uri_for_base(base, device_id)
+      base = base.chomp("/")
+      token = SiteSetting.live_metrics_hyperate_api_key.to_s.strip
+
+      if base.include?(":deviceId")
+        uri = URI.parse(base.gsub(":deviceId", CGI.escape(device_id)))
+      elsif phoenix_socket_base?(base)
+        uri = URI.parse(base)
+      else
+        uri = URI.parse("#{base}/#{CGI.escape(device_id)}")
+      end
+
+      existing_query = URI.decode_www_form(uri.query.to_s) rescue []
+      existing_query.reject! { |key, _| key == "token" }
+      existing_query << ["token", token]
+      uri.query = URI.encode_www_form(existing_query)
       uri
+    end
+
+    def self.endpoint_name(base)
+      phoenix_socket_base?(base) ? "phoenix_socket" : "device_path"
+    end
+
+    def self.phoenix_socket_base?(base)
+      path = URI.parse(base).path.to_s rescue ""
+      path == LEGACY_SOCKET_PATH || path.end_with?(LEGACY_SOCKET_PATH)
+    end
+
+    def self.fallback_allowed_for?(error)
+      return true if error.is_a?(Unauthorized) && [401, 403].include?(error.status.to_i)
+      return true if error.is_a?(Error) && error.status.to_i != 101
+
+      false
+    end
+
+    def self.join_message(device_id)
+      {
+        topic: "hr:#{device_id}",
+        event: "phx_join",
+        payload: {},
+        ref: "1"
+      }.to_json
+    end
+
+    def self.leave_message(device_id)
+      {
+        topic: "hr:#{device_id}",
+        event: "phx_leave",
+        payload: {},
+        ref: Time.now.to_i.to_s
+      }.to_json
     end
 
     def self.read_http_response(socket)

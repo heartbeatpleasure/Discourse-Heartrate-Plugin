@@ -23,5 +23,5 @@ en:
     live_metrics_pulsoid_redirect_uri_override: "Optional exact Pulsoid OAuth redirect URI override. Leave blank to use /live-metrics/auth/pulsoid/callback on this site."
     live_metrics_hyperate_enabled: "Enable HypeRate as a provider for Heartrate."
     live_metrics_hyperate_api_key: "HypeRate API key. Keep this server-side only; users only enter their HypeRate device ID."
-    live_metrics_hyperate_ws_url: "HypeRate WebSocket base URL."
+    live_metrics_hyperate_ws_url: "HypeRate WebSocket base URL. Use the Phoenix socket endpoint by default; the plugin can fall back to the device-path endpoint."
     live_metrics_hyperate_read_timeout_seconds: "Maximum seconds a request may wait for a HypeRate WebSocket heart-rate update."
