@@ -43,7 +43,7 @@ after_initialize do
     get "/live-metrics/auth/pulsoid/callback" => "live_metrics/auth#pulsoid_callback"
     delete "/live-metrics/auth/pulsoid" => "live_metrics/auth#pulsoid_disconnect", defaults: { format: :json }
 
-    get "/live-metrics/api/config" => "live_metrics/api#config", defaults: { format: :json }
+    get "/live-metrics/api/config" => "live_metrics/api#plugin_config", defaults: { format: :json }
     get "/live-metrics/api/me" => "live_metrics/api#me", defaults: { format: :json }
     put "/live-metrics/api/me/settings" => "live_metrics/api#update_me", defaults: { format: :json }
     patch "/live-metrics/api/me/settings" => "live_metrics/api#update_me", defaults: { format: :json }

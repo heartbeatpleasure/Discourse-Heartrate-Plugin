@@ -4,11 +4,17 @@ module ::LiveMetrics
   class ApiController < ::ApplicationController
     requires_plugin ::LiveMetrics::PLUGIN_NAME
 
+    skip_before_action :check_xhr, raise: false
+
     before_action :ensure_enabled
     before_action :ensure_logged_in, only: %i[me update_me]
-    before_action :ensure_logged_in, only: %i[config directory], if: -> { SiteSetting.live_metrics_require_login_to_view_page }
+    before_action :ensure_logged_in, only: %i[plugin_config directory], if: -> { SiteSetting.live_metrics_require_login_to_view_page }
 
-    def config
+    # NOTE: do not name this action `config`; ActionController already has
+    # a `config` method and Discourse plugin controllers can fail hard when
+    # routes point at an action with that name. Keep the public URL as
+    # /live-metrics/api/config, but route it to plugin_config internally.
+    def plugin_config
       live_metrics_render_json(
         enabled: SiteSetting.live_metrics_enabled,
         directory_enabled: SiteSetting.live_metrics_directory_enabled,
