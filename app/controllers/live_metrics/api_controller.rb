@@ -9,10 +9,11 @@ module ::LiveMetrics
     before_action :ensure_logged_in, only: %i[config directory], if: -> { SiteSetting.live_metrics_require_login_to_view_page }
 
     def config
-      render_json_dump(
+      live_metrics_render_json(
         enabled: SiteSetting.live_metrics_enabled,
         directory_enabled: SiteSetting.live_metrics_directory_enabled,
         statistics_enabled: SiteSetting.live_metrics_statistics_enabled,
+        database_ready: provider_accounts_table_ready?,
         poll_interval_seconds: SiteSetting.live_metrics_poll_interval_seconds.to_i,
         providers: {
           pulsoid: {
@@ -26,16 +27,18 @@ module ::LiveMetrics
     end
 
     def me
-      render_json_dump(current_user_payload(include_live: true, include_statistics: true))
+      live_metrics_render_json(current_user_payload(include_live: true, include_statistics: true))
     end
 
     def update_me
+      return live_metrics_render_error("database_not_ready", status: 503, message: "The Heartrate database table is not ready yet. Run Discourse migrations and rebuild/restart.") unless provider_accounts_table_ready?
+
       account = current_pulsoid_account
-      return render_json_error("not_connected", status: 404) if account.blank?
+      return live_metrics_render_error("not_connected", status: 404) if account.blank?
 
       visibility = params[:visibility].to_s
       if visibility.present?
-        return render_json_error("invalid_visibility", status: 422) unless ::LiveMetrics::ProviderAccount::VISIBILITIES.include?(visibility)
+        return live_metrics_render_error("invalid_visibility", status: 422) unless ::LiveMetrics::ProviderAccount::VISIBILITIES.include?(visibility)
         account.visibility = visibility
       end
 
@@ -43,11 +46,15 @@ module ::LiveMetrics
       account.show_in_directory = boolean_param(:show_in_directory, default: account.show_in_directory)
       account.save!
 
-      render_json_dump(current_user_payload(include_live: true, include_statistics: true))
+      live_metrics_render_json(current_user_payload(include_live: true, include_statistics: true))
     end
 
     def directory
       raise Discourse::NotFound unless SiteSetting.live_metrics_directory_enabled
+
+      unless provider_accounts_table_ready?
+        return live_metrics_render_json(users: [], generated_at: Time.zone.now.iso8601, database_ready: false)
+      end
 
       accounts = ::LiveMetrics::ProviderAccount
         .pulsoid
@@ -63,7 +70,7 @@ module ::LiveMetrics
       end
 
       rows.sort_by! { |row| live_sort_key(row[:live]) }
-      render_json_dump(users: rows, generated_at: Time.zone.now.iso8601)
+      live_metrics_render_json(users: rows, generated_at: Time.zone.now.iso8601)
     end
 
     def user
@@ -73,22 +80,42 @@ module ::LiveMetrics
       account = ::LiveMetrics::ProviderAccount.pulsoid.profile_enabled.find_by(user_id: user.id)
       raise Discourse::NotFound if account.blank? || !can_view_account?(account, surface: :profile)
 
-      render_json_dump(account_payload(account, include_user: true, include_live: true, include_statistics: true, surface: :profile))
+      live_metrics_render_json(account_payload(account, include_user: true, include_live: true, include_statistics: true, surface: :profile))
     end
 
     private
+
+    def live_metrics_render_json(payload = nil, status: 200, **keyword_payload)
+      payload = keyword_payload if payload.nil?
+      payload = {} if payload.nil?
+      render json: payload, status: status
+    end
+
+    def live_metrics_render_error(error_key, status: 422, message: nil)
+      live_metrics_render_json({ error: error_key, message: message || error_key }, status: status)
+    end
 
     def ensure_enabled
       raise Discourse::NotFound unless SiteSetting.live_metrics_enabled
     end
 
     def current_pulsoid_account
-      return nil if current_user.blank?
+      return nil if current_user.blank? || !provider_accounts_table_ready?
 
       ::LiveMetrics::ProviderAccount.find_by(
         user_id: current_user.id,
         provider: ::LiveMetrics::ProviderAccount::PROVIDER_PULSOID
       )
+    rescue ActiveRecord::StatementInvalid => e
+      Rails.logger.warn("[live_metrics] provider account lookup failed user_id=#{current_user&.id} error=#{e.class}: #{e.message}")
+      nil
+    end
+
+    def provider_accounts_table_ready?
+      ::LiveMetrics::ProviderAccount.table_exists?
+    rescue => e
+      Rails.logger.warn("[live_metrics] provider account table check failed error=#{e.class}: #{e.message}")
+      false
     end
 
     def current_user_payload(include_live:, include_statistics:)

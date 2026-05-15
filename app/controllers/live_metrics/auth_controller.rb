@@ -34,6 +34,10 @@ module ::LiveMetrics
         return redirect_to "/live-metrics?error=missing_authorization_code"
       end
 
+      unless provider_accounts_table_ready?
+        return redirect_to "/live-metrics?error=database_not_ready"
+      end
+
       token_payload = ::LiveMetrics::PulsoidClient.exchange_code!(code: code)
 
       account = ::LiveMetrics::ProviderAccount.find_or_initialize_by(
@@ -62,6 +66,10 @@ module ::LiveMetrics
     end
 
     def pulsoid_disconnect
+      unless provider_accounts_table_ready?
+        return render json: { disconnected: false, error: "database_not_ready" }, status: 503
+      end
+
       account = ::LiveMetrics::ProviderAccount.find_by(
         user_id: current_user.id,
         provider: ::LiveMetrics::ProviderAccount::PROVIDER_PULSOID
@@ -72,13 +80,20 @@ module ::LiveMetrics
         account.destroy!
       end
 
-      render_json_dump(disconnected: true)
+      render json: { disconnected: true }, status: 200
     end
 
     private
 
     def ensure_enabled
       raise Discourse::NotFound unless SiteSetting.live_metrics_enabled && SiteSetting.live_metrics_pulsoid_enabled
+    end
+
+    def provider_accounts_table_ready?
+      ::LiveMetrics::ProviderAccount.table_exists?
+    rescue => e
+      Rails.logger.warn("[live_metrics] provider account table check failed error=#{e.class}: #{e.message}")
+      false
     end
   end
 end
