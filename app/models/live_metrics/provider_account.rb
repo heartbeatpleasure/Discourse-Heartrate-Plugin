@@ -19,26 +19,18 @@ module ::LiveMetrics
     scope :pulsoid, -> { where(provider: PROVIDER_PULSOID) }
     scope :hyperate, -> { where(provider: PROVIDER_HYPERATE) }
     scope :enabled_providers, -> { where(provider: ::LiveMetrics.enabled_provider_names) }
+    scope :active, -> { where(active: true) }
     scope :directory_enabled, -> { where(show_in_directory: true) }
     scope :profile_enabled, -> { where(show_on_profile: true) }
-    scope :active, -> { where(active: true) }
 
     def self.activate_for_user!(account)
       return nil if account.blank?
+      return nil unless account.connected?
 
       now = Time.zone.now
 
       transaction do
-        # Keep provider activation deliberately narrow and robust. Existing
-        # provider records have already passed validation when they were
-        # connected; activation should not fail because unrelated optional
-        # provider fields or transient validation state changed.
-        where(user_id: account.user_id).where.not(id: account.id).update_all(
-          active: false,
-          show_in_directory: false,
-          show_on_profile: false,
-          updated_at: now
-        )
+        where(user_id: account.user_id).where.not(id: account.id).update_all(active: false, updated_at: now)
 
         if account.persisted?
           account.update_columns(active: true, updated_at: now)
@@ -53,14 +45,18 @@ module ::LiveMetrics
 
     def self.ensure_active_for_user!(user_id)
       return nil if user_id.blank?
-      return active.where(user_id: user_id).first if active.where(user_id: user_id).exists?
 
-      account = where(user_id: user_id, provider: ::LiveMetrics.enabled_provider_names).order(updated_at: :desc).first
+      existing = active.where(user_id: user_id, provider: ::LiveMetrics.enabled_provider_names).detect(&:connected?)
+      return existing if existing.present?
+
+      account = where(user_id: user_id, provider: ::LiveMetrics.enabled_provider_names).order(updated_at: :desc).detect(&:connected?)
       activate_for_user!(account) if account.present?
     end
 
     def self.activate_fallback_for_user!(user_id)
-      account = where(user_id: user_id, provider: ::LiveMetrics.enabled_provider_names).order(updated_at: :desc).first
+      return nil if user_id.blank?
+
+      account = where(user_id: user_id, provider: ::LiveMetrics.enabled_provider_names).order(updated_at: :desc).detect(&:connected?)
       activate_for_user!(account) if account.present?
     end
 
@@ -98,6 +94,10 @@ module ::LiveMetrics
       else
         false
       end
+    end
+
+    def activate!
+      self.class.activate_for_user!(self)
     end
 
     def pulsoid?

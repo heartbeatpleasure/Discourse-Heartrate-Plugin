@@ -55,18 +55,22 @@ module ::LiveMetrics
       device_id = normalize_device_id(account.provider_uid)
       return { status: "no_data", heart_rate: nil, measured_at: nil, measured_at_ms: nil, error: "Missing HypeRate device ID." } if device_id.blank?
 
-      cache_key = "live_metrics:hyperate:latest:v1:#{account.id}:#{device_id}:#{account.updated_at.to_i}"
+      cache_key = "live_metrics:hyperate:latest:v2:#{account.id}:#{device_id}:#{account.updated_at.to_i}"
       Discourse.cache.fetch(cache_key, expires_in: SiteSetting.live_metrics_api_cache_seconds.seconds) do
-        normalize_latest_response(read_latest_heart_rate(device_id))
+        begin
+          account.update_columns(last_error: nil) if account.last_error.present?
+          normalize_latest_response(read_latest_heart_rate(device_id))
+        rescue Unauthorized => e
+          account.update_columns(last_error: "unauthorized", updated_at: Time.zone.now) rescue nil
+          { status: "unauthorized", heart_rate: nil, measured_at: nil, measured_at_ms: nil, error: unauthorized_message(e) }
+        rescue NoHeartRateData => e
+          account.update_columns(last_error: nil) if account.last_error.present? rescue nil
+          { status: "no_data", heart_rate: nil, measured_at: nil, measured_at_ms: nil, error: e.message }
+        rescue => e
+          Rails.logger.warn("[live_metrics] HypeRate latest failed account_id=#{account.id} device_id=#{device_id} error=#{e.class}: #{e.message}")
+          { status: "unavailable", heart_rate: nil, measured_at: nil, measured_at_ms: nil, error: "HypeRate data is temporarily unavailable." }
+        end
       end
-    rescue Unauthorized => e
-      account.update_columns(last_error: "unauthorized", updated_at: Time.zone.now) rescue nil
-      { status: "unauthorized", heart_rate: nil, measured_at: nil, measured_at_ms: nil, error: unauthorized_message(e) }
-    rescue NoHeartRateData => e
-      { status: "no_data", heart_rate: nil, measured_at: nil, measured_at_ms: nil, error: e.message }
-    rescue => e
-      Rails.logger.warn("[live_metrics] HypeRate latest failed account_id=#{account.id} device_id=#{device_id} error=#{e.class}: #{e.message}")
-      { status: "unavailable", heart_rate: nil, measured_at: nil, measured_at_ms: nil, error: "HypeRate data is temporarily unavailable." }
     end
 
     def self.read_latest_heart_rate(device_id)

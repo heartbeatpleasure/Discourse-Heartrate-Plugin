@@ -67,13 +67,13 @@ after_initialize do
 
     get "/live-metrics/api/config" => "live_metrics/api#plugin_config", defaults: { format: :json }
     get "/live-metrics/api/me" => "live_metrics/api#me", defaults: { format: :json }
-    get "/live-metrics/api/me/live" => "live_metrics/api#me_live", defaults: { format: :json }
     put "/live-metrics/api/me/settings" => "live_metrics/api#update_me", defaults: { format: :json }
     patch "/live-metrics/api/me/settings" => "live_metrics/api#update_me", defaults: { format: :json }
     put "/live-metrics/api/accounts/:provider/settings" => "live_metrics/api#update_account", defaults: { format: :json }
     patch "/live-metrics/api/accounts/:provider/settings" => "live_metrics/api#update_account", defaults: { format: :json }
     put "/live-metrics/api/accounts/:provider/activate" => "live_metrics/api#activate_account", defaults: { format: :json }
     patch "/live-metrics/api/accounts/:provider/activate" => "live_metrics/api#activate_account", defaults: { format: :json }
+    get "/live-metrics/api/live-preview" => "live_metrics/api#live_preview", defaults: { format: :json }
     get "/live-metrics/api/directory" => "live_metrics/api#directory", defaults: { format: :json }
     get "/live-metrics/api/users/:username" => "live_metrics/api#user", defaults: { format: :json }
   end

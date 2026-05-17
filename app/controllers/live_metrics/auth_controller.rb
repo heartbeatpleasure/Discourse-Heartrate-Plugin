@@ -62,7 +62,7 @@ module ::LiveMetrics
       account.show_on_profile = false if account.show_on_profile.nil?
       account.show_in_directory = false if account.show_in_directory.nil?
       account.save!
-      ::LiveMetrics::ProviderAccount.activate_for_user!(account) unless ::LiveMetrics::ProviderAccount.where(user_id: current_user.id, active: true).exists?
+      account.activate!
 
       profile = ::LiveMetrics::PulsoidClient.profile(account)
       if profile.present?
@@ -93,7 +93,7 @@ module ::LiveMetrics
         was_active = account.active?
         ::LiveMetrics::PulsoidClient.revoke(account)
         account.destroy!
-        ::LiveMetrics::ProviderAccount.activate_fallback_for_user!(current_user.id) if was_active
+        activate_fallback_account_for_user! if was_active
       end
 
       render json: { disconnected: true }, status: 200
@@ -117,8 +117,18 @@ module ::LiveMetrics
       "/live-metrics?#{query.to_query}"
     end
 
+    def activate_fallback_account_for_user!
+      fallback = ::LiveMetrics::ProviderAccount
+        .where(user_id: current_user.id, provider: ::LiveMetrics.enabled_provider_names)
+        .order(updated_at: :desc)
+        .detect(&:connected?)
+      fallback&.activate!
+    rescue => e
+      Rails.logger.warn("[live_metrics] fallback provider activation failed user_id=#{current_user&.id} error=#{e.class}: #{e.message}")
+    end
+
     def provider_accounts_table_ready?
-      ::LiveMetrics::ProviderAccount.table_exists?
+      ::LiveMetrics::ProviderAccount.table_exists? && ::LiveMetrics::ProviderAccount.column_names.include?("active")
     rescue => e
       Rails.logger.warn("[live_metrics] provider account table check failed error=#{e.class}: #{e.message}")
       false

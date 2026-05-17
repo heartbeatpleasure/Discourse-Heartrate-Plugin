@@ -7,7 +7,7 @@ module ::LiveMetrics
     skip_before_action :check_xhr, raise: false
 
     before_action :ensure_enabled
-    before_action :ensure_logged_in, only: %i[me me_live update_me update_account activate_account connect_hyperate disconnect_hyperate]
+    before_action :ensure_logged_in, only: %i[me live_preview update_me update_account activate_account connect_hyperate disconnect_hyperate]
     before_action :ensure_logged_in, only: %i[plugin_config directory], if: -> { SiteSetting.live_metrics_require_login_to_view_page }
 
     # NOTE: do not name this action `config`; ActionController already has
@@ -27,23 +27,22 @@ module ::LiveMetrics
     end
 
     def me
-      include_live = params[:include_live].to_s != "false"
-      include_statistics = params[:include_statistics].to_s != "false"
-
-      live_metrics_render_json(current_user_payload(include_live: include_live, include_statistics: include_statistics))
-    end
-
-    def me_live
       return live_metrics_render_error("database_not_ready", status: 503, message: database_not_ready_message) unless provider_accounts_table_ready?
 
-      account = current_active_account
-      payload = account.present? ? account_payload(account, include_user: false, include_live: true, include_statistics: false, surface: :self) : nil
+      ensure_active_account_for_user!(current_user)
+      live_metrics_render_json(current_user_payload(include_live: false, include_statistics: false))
+    end
 
-      live_metrics_render_json(
-        user: user_payload(current_user),
-        account: payload,
+    def live_preview
+      return live_metrics_render_error("database_not_ready", status: 503, message: database_not_ready_message) unless provider_accounts_table_ready?
+
+      account = active_current_account
+      payload = {
+        account: account ? account_payload(account, include_user: false, include_live: true, include_statistics: false, surface: :self) : nil,
         generated_at: Time.zone.now.iso8601
-      )
+      }
+
+      live_metrics_render_json(payload)
     end
 
     # Backwards-compatible settings endpoint. When no provider is supplied, the
@@ -52,7 +51,7 @@ module ::LiveMetrics
     def update_me
       return live_metrics_render_error("database_not_ready", status: 503, message: database_not_ready_message) unless provider_accounts_table_ready?
 
-      account = current_provider_account(params[:provider].presence || preferred_account_provider)
+      account = current_provider_account(params[:provider].presence || active_current_account&.provider || preferred_account_provider)
       return live_metrics_render_error("not_connected", status: 404) if account.blank?
 
       apply_account_settings!(account)
@@ -65,42 +64,34 @@ module ::LiveMetrics
       return live_metrics_render_error("database_not_ready", status: 503, message: database_not_ready_message) unless provider_accounts_table_ready?
 
       provider = normalize_provider(params[:provider])
-      return live_metrics_render_error("invalid_provider", status: 422, message: "Unknown heartrate provider.") if provider.blank?
+      return live_metrics_render_error("invalid_provider", status: 422) if provider.blank?
 
       account = current_provider_account(provider)
-      return live_metrics_render_error("not_connected", status: 404, message: "This provider is not connected yet.") if account.blank?
+      return live_metrics_render_error("not_connected", status: 404) if account.blank?
 
       apply_account_settings!(account)
       return if performed?
 
       live_metrics_render_json(current_user_payload(include_live: false, include_statistics: false))
-    rescue ActiveRecord::RecordInvalid => e
-      Rails.logger.warn("[live_metrics] provider settings validation failed user_id=#{current_user&.id} provider=#{params[:provider]} error=#{e.class}: #{e.message}")
-      live_metrics_render_error("settings_validation_failed", status: 422, message: e.record&.errors&.full_messages&.to_sentence.presence || "Your heartrate settings could not be saved.")
-    rescue ActiveRecord::StatementInvalid, ActiveRecord::ActiveRecordError => e
-      Rails.logger.warn("[live_metrics] provider settings save failed user_id=#{current_user&.id} provider=#{params[:provider]} error=#{e.class}: #{e.message}")
-      live_metrics_render_error("settings_save_failed", status: 500, message: "Your heartrate settings could not be saved. Please ask staff to check the server logs.")
     end
 
     def activate_account
       return live_metrics_render_error("database_not_ready", status: 503, message: database_not_ready_message) unless provider_accounts_table_ready?
 
       provider = normalize_provider(params[:provider])
-      return live_metrics_render_error("invalid_provider", status: 422, message: "Unknown heartrate provider.") if provider.blank?
+      return live_metrics_render_error("invalid_provider", status: 422, message: "Choose a valid heartrate provider.") if provider.blank?
 
       account = current_provider_account(provider)
-      return live_metrics_render_error("not_connected", status: 404, message: "Connect this provider before making it active.") if account.blank?
-      return live_metrics_render_error("provider_disabled", status: 422, message: "This provider is disabled by staff.") unless ::LiveMetrics.enabled_provider_names.include?(provider)
-      return live_metrics_render_error("provider_not_connected", status: 422, message: "Connect this provider before making it active.") unless account.connected?
+      return live_metrics_render_error("not_connected", status: 404, message: "Connect this provider before making it active.") if account.blank? || !account.connected?
+      return live_metrics_render_error("provider_disabled", status: 404, message: "This provider is currently disabled.") unless ::LiveMetrics.enabled_provider_names.include?(provider)
 
-      ::LiveMetrics::ProviderAccount.activate_for_user!(account)
+      account.activate!
       live_metrics_render_json(current_user_payload(include_live: false, include_statistics: false))
     rescue ActiveRecord::RecordInvalid => e
-      Rails.logger.warn("[live_metrics] provider activation validation failed user_id=#{current_user&.id} provider=#{params[:provider]} error=#{e.class}: #{e.message}")
-      live_metrics_render_error("activation_validation_failed", status: 422, message: e.record&.errors&.full_messages&.to_sentence.presence || "The active heartrate provider could not be changed.")
-    rescue ActiveRecord::StatementInvalid, ActiveRecord::ActiveRecordError => e
-      Rails.logger.warn("[live_metrics] provider activation failed user_id=#{current_user&.id} provider=#{params[:provider]} error=#{e.class}: #{e.message}")
-      live_metrics_render_error("activation_failed", status: 500, message: "The active heartrate provider could not be changed. Please ask staff to check the server logs.")
+      live_metrics_render_error("activate_failed", status: 422, message: e.record.errors.full_messages.join(", ").presence || "The active provider could not be changed.")
+    rescue => e
+      Rails.logger.warn("[live_metrics] activate provider failed user_id=#{current_user&.id} provider=#{params[:provider]} error=#{e.class}: #{e.message}")
+      live_metrics_render_error("activate_failed", status: 422, message: "The active provider could not be changed.")
     end
 
     def connect_hyperate
@@ -128,8 +119,7 @@ module ::LiveMetrics
       account.scopes = nil
       account.last_error = nil
       account.save!
-
-      activate_account_if_needed!(account)
+      account.activate!
 
       live_metrics_render_json(current_user_payload(include_live: false, include_statistics: false), status: 200)
     end
@@ -143,7 +133,7 @@ module ::LiveMetrics
       )
       was_active = account&.active?
       account&.destroy!
-      activate_fallback_account!(current_user.id) if was_active
+      activate_fallback_account_for_user!(current_user) if was_active
 
       live_metrics_render_json(disconnected: true)
     end
@@ -231,31 +221,17 @@ module ::LiveMetrics
     def current_accounts
       return [] if current_user.blank? || !provider_accounts_table_ready?
 
-      accounts = ::LiveMetrics::ProviderAccount
+      ::LiveMetrics::ProviderAccount
         .where(user_id: current_user.id, provider: ::LiveMetrics.enabled_provider_names)
         .order(active: :desc, updated_at: :desc, provider: :asc)
         .to_a
-
-      if accounts.any? && accounts.none?(&:active?)
-        ::LiveMetrics::ProviderAccount.activate_for_user!(accounts.first)
-        accounts = ::LiveMetrics::ProviderAccount
-          .where(user_id: current_user.id, provider: ::LiveMetrics.enabled_provider_names)
-          .order(active: :desc, updated_at: :desc, provider: :asc)
-          .to_a
-      end
-
-      accounts
     rescue ActiveRecord::StatementInvalid => e
       Rails.logger.warn("[live_metrics] provider account lookup failed user_id=#{current_user&.id} error=#{e.class}: #{e.message}")
       []
     end
 
-    def current_active_account
-      current_accounts.find(&:active?)
-    end
-
     def provider_accounts_table_ready?
-      ::LiveMetrics::ProviderAccount.table_exists?
+      ::LiveMetrics::ProviderAccount.table_exists? && ::LiveMetrics::ProviderAccount.column_names.include?("active")
     rescue => e
       Rails.logger.warn("[live_metrics] provider account table check failed error=#{e.class}: #{e.message}")
       false
@@ -263,28 +239,53 @@ module ::LiveMetrics
 
     def current_user_payload(include_live:, include_statistics:)
       accounts = current_accounts.map do |account|
-        account_payload(
-          account,
-          include_user: false,
-          include_live: include_live && account.active?,
-          include_statistics: include_statistics && account.active?,
-          surface: :self
-        )
+        account_payload(account, include_user: false, include_live: include_live && account.active?, include_statistics: include_statistics && account.active?, surface: :self)
       end
+
+      active_account = accounts.find { |account| account[:active] } || accounts.first
 
       {
         user: user_payload(current_user),
-        account: active_account_payload(accounts),
+        account: active_account,
+        active_provider: active_account&.dig(:provider),
         accounts: accounts
       }
     end
 
-    def active_account_payload(accounts)
-      accounts.find { |account| account[:active] == true } || accounts.first
+    def preferred_account_provider
+      current_accounts.first&.provider
     end
 
-    def preferred_account_provider
-      current_active_account&.provider || current_accounts.first&.provider
+    def active_current_account
+      ensure_active_account_for_user!(current_user)
+      current_accounts.find(&:active?)
+    end
+
+    def ensure_active_account_for_user!(user)
+      return if user.blank? || !provider_accounts_table_ready?
+
+      accounts = ::LiveMetrics::ProviderAccount
+        .where(user_id: user.id, provider: ::LiveMetrics.enabled_provider_names)
+        .select(&:connected?)
+
+      return if accounts.blank?
+      return if accounts.any?(&:active?)
+
+      accounts.max_by(&:updated_at)&.activate!
+    rescue => e
+      Rails.logger.warn("[live_metrics] active provider check failed user_id=#{user&.id} error=#{e.class}: #{e.message}")
+    end
+
+    def activate_fallback_account_for_user!(user)
+      return if user.blank? || !provider_accounts_table_ready?
+
+      fallback = ::LiveMetrics::ProviderAccount
+        .where(user_id: user.id, provider: ::LiveMetrics.enabled_provider_names)
+        .order(updated_at: :desc)
+        .detect(&:connected?)
+      fallback&.activate!
+    rescue => e
+      Rails.logger.warn("[live_metrics] fallback provider activation failed user_id=#{user&.id} error=#{e.class}: #{e.message}")
     end
 
     def account_payload(account, include_user:, include_live:, include_statistics:, surface:)
@@ -354,15 +355,14 @@ module ::LiveMetrics
         account.visibility = visibility
       end
 
-      if params.key?(:active) && ActiveModel::Type::Boolean.new.cast(params[:active])
-        account = ::LiveMetrics::ProviderAccount.activate_for_user!(account)
-      end
-
       account.show_on_profile = boolean_param(:show_on_profile, default: account.show_on_profile)
-
-      requested_directory = boolean_param(:show_in_directory, default: account.show_in_directory)
-      account.show_in_directory = account.active? ? requested_directory : false
+      account.show_in_directory = boolean_param(:show_in_directory, default: account.show_in_directory)
       account.save!
+    rescue ActiveRecord::RecordInvalid => e
+      live_metrics_render_error("settings_save_failed", status: 422, message: e.record.errors.full_messages.join(", ").presence || "Your heartrate settings could not be saved.")
+    rescue => e
+      Rails.logger.warn("[live_metrics] account settings save failed account_id=#{account&.id} error=#{e.class}: #{e.message}")
+      live_metrics_render_error("settings_save_failed", status: 422, message: "Your heartrate settings could not be saved.")
     end
 
     def can_view_account?(account, surface:)
@@ -389,19 +389,6 @@ module ::LiveMetrics
       else
         false
       end
-    end
-
-    def activate_account_if_needed!(account)
-      return if ::LiveMetrics::ProviderAccount.where(user_id: account.user_id, active: true).exists?
-
-      ::LiveMetrics::ProviderAccount.activate_for_user!(account)
-    end
-
-    def activate_fallback_account!(user_id)
-      ::LiveMetrics::ProviderAccount.activate_fallback_for_user!(user_id)
-    rescue => e
-      Rails.logger.warn("[live_metrics] fallback activation failed user_id=#{user_id} error=#{e.class}: #{e.message}")
-      nil
     end
 
     def visibility_options
