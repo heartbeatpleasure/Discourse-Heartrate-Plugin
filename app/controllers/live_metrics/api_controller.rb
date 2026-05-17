@@ -7,7 +7,7 @@ module ::LiveMetrics
     skip_before_action :check_xhr, raise: false
 
     before_action :ensure_enabled
-    before_action :ensure_logged_in, only: %i[me update_me update_account connect_hyperate disconnect_hyperate]
+    before_action :ensure_logged_in, only: %i[me me_live update_me update_account connect_hyperate disconnect_hyperate]
     before_action :ensure_logged_in, only: %i[plugin_config directory], if: -> { SiteSetting.live_metrics_require_login_to_view_page }
 
     # NOTE: do not name this action `config`; ActionController already has
@@ -27,11 +27,27 @@ module ::LiveMetrics
     end
 
     def me
-      live_metrics_render_json(current_user_payload(include_live: true, include_statistics: true))
+      include_live = params[:include_live].to_s != "false"
+      include_statistics = params[:include_statistics].to_s != "false"
+
+      live_metrics_render_json(current_user_payload(include_live: include_live, include_statistics: include_statistics))
+    end
+
+    def me_live
+      return live_metrics_render_error("database_not_ready", status: 503, message: database_not_ready_message) unless provider_accounts_table_ready?
+
+      account = current_active_account
+      payload = account.present? ? account_payload(account, include_user: false, include_live: true, include_statistics: false, surface: :self) : nil
+
+      live_metrics_render_json(
+        user: user_payload(current_user),
+        account: payload,
+        generated_at: Time.zone.now.iso8601
+      )
     end
 
     # Backwards-compatible settings endpoint. When no provider is supplied, the
-    # first connected account is updated. Newer frontend code uses update_account
+    # active connected account is updated. Newer frontend code uses update_account
     # so multiple providers can be managed independently.
     def update_me
       return live_metrics_render_error("database_not_ready", status: 503, message: database_not_ready_message) unless provider_accounts_table_ready?
@@ -42,7 +58,7 @@ module ::LiveMetrics
       apply_account_settings!(account)
       return if performed?
 
-      live_metrics_render_json(current_user_payload(include_live: true, include_statistics: true))
+      live_metrics_render_json(current_user_payload(include_live: false, include_statistics: false))
     end
 
     def update_account
@@ -57,7 +73,7 @@ module ::LiveMetrics
       apply_account_settings!(account)
       return if performed?
 
-      live_metrics_render_json(current_user_payload(include_live: true, include_statistics: true))
+      live_metrics_render_json(current_user_payload(include_live: false, include_statistics: false))
     end
 
     def connect_hyperate
@@ -86,6 +102,8 @@ module ::LiveMetrics
       account.last_error = nil
       account.save!
 
+      activate_account_if_needed!(account)
+
       live_metrics_render_json(current_user_payload(include_live: false, include_statistics: false), status: 200)
     end
 
@@ -96,7 +114,9 @@ module ::LiveMetrics
         user_id: current_user.id,
         provider: ::LiveMetrics::ProviderAccount::PROVIDER_HYPERATE
       )
+      was_active = account&.active?
       account&.destroy!
+      activate_fallback_account!(current_user.id) if was_active
 
       live_metrics_render_json(disconnected: true)
     end
@@ -110,6 +130,7 @@ module ::LiveMetrics
 
       accounts = ::LiveMetrics::ProviderAccount
         .enabled_providers
+        .active
         .directory_enabled
         .includes(:user)
         .order(updated_at: :desc)
@@ -129,7 +150,7 @@ module ::LiveMetrics
       user = ::User.find_by(username_lower: params[:username].to_s.downcase)
       raise Discourse::NotFound if user.blank?
 
-      account = ::LiveMetrics::ProviderAccount.enabled_providers.profile_enabled.find_by(user_id: user.id)
+      account = ::LiveMetrics::ProviderAccount.enabled_providers.active.profile_enabled.find_by(user_id: user.id)
       raise Discourse::NotFound if account.blank? || !can_view_account?(account, surface: :profile)
 
       live_metrics_render_json(account_payload(account, include_user: true, include_live: true, include_statistics: true, surface: :profile))
@@ -183,13 +204,27 @@ module ::LiveMetrics
     def current_accounts
       return [] if current_user.blank? || !provider_accounts_table_ready?
 
-      ::LiveMetrics::ProviderAccount
+      accounts = ::LiveMetrics::ProviderAccount
         .where(user_id: current_user.id, provider: ::LiveMetrics.enabled_provider_names)
-        .order(:provider)
+        .order(active: :desc, updated_at: :desc, provider: :asc)
         .to_a
+
+      if accounts.any? && accounts.none?(&:active?)
+        ::LiveMetrics::ProviderAccount.activate_for_user!(accounts.first)
+        accounts = ::LiveMetrics::ProviderAccount
+          .where(user_id: current_user.id, provider: ::LiveMetrics.enabled_provider_names)
+          .order(active: :desc, updated_at: :desc, provider: :asc)
+          .to_a
+      end
+
+      accounts
     rescue ActiveRecord::StatementInvalid => e
       Rails.logger.warn("[live_metrics] provider account lookup failed user_id=#{current_user&.id} error=#{e.class}: #{e.message}")
       []
+    end
+
+    def current_active_account
+      current_accounts.find(&:active?)
     end
 
     def provider_accounts_table_ready?
@@ -201,22 +236,28 @@ module ::LiveMetrics
 
     def current_user_payload(include_live:, include_statistics:)
       accounts = current_accounts.map do |account|
-        account_payload(account, include_user: false, include_live: include_live, include_statistics: include_statistics, surface: :self)
+        account_payload(
+          account,
+          include_user: false,
+          include_live: include_live && account.active?,
+          include_statistics: include_statistics && account.active?,
+          surface: :self
+        )
       end
 
       {
         user: user_payload(current_user),
-        account: preferred_account_payload(accounts),
+        account: active_account_payload(accounts),
         accounts: accounts
       }
     end
 
-    def preferred_account_payload(accounts)
-      accounts.find { |account| account.dig(:live, :status).to_s == "live" } || accounts.first
+    def active_account_payload(accounts)
+      accounts.find { |account| account[:active] == true } || accounts.first
     end
 
     def preferred_account_provider
-      current_accounts.first&.provider
+      current_active_account&.provider || current_accounts.first&.provider
     end
 
     def account_payload(account, include_user:, include_live:, include_statistics:, surface:)
@@ -226,6 +267,7 @@ module ::LiveMetrics
         provider_label: provider_label(account.provider),
         display_name: account.display_name.presence || default_display_name(account.provider),
         connected: account.connected?,
+        active: account.active?,
         visibility: account.visibility,
         show_on_profile: account.show_on_profile,
         show_in_directory: account.show_in_directory,
@@ -285,13 +327,20 @@ module ::LiveMetrics
         account.visibility = visibility
       end
 
+      if params.key?(:active) && ActiveModel::Type::Boolean.new.cast(params[:active])
+        account = ::LiveMetrics::ProviderAccount.activate_for_user!(account)
+      end
+
       account.show_on_profile = boolean_param(:show_on_profile, default: account.show_on_profile)
-      account.show_in_directory = boolean_param(:show_in_directory, default: account.show_in_directory)
+
+      requested_directory = boolean_param(:show_in_directory, default: account.show_in_directory)
+      account.show_in_directory = account.active? ? requested_directory : false
       account.save!
     end
 
     def can_view_account?(account, surface:)
       return false unless account&.connected?
+      return false unless account.active?
       return false unless ::LiveMetrics.enabled_provider_names.include?(account.provider)
       return true if current_user&.staff?
       return true if current_user.present? && account.user_id == current_user.id
@@ -313,6 +362,19 @@ module ::LiveMetrics
       else
         false
       end
+    end
+
+    def activate_account_if_needed!(account)
+      return if ::LiveMetrics::ProviderAccount.where(user_id: account.user_id, active: true).exists?
+
+      ::LiveMetrics::ProviderAccount.activate_for_user!(account)
+    end
+
+    def activate_fallback_account!(user_id)
+      ::LiveMetrics::ProviderAccount.activate_fallback_for_user!(user_id)
+    rescue => e
+      Rails.logger.warn("[live_metrics] fallback activation failed user_id=#{user_id} error=#{e.class}: #{e.message}")
+      nil
     end
 
     def visibility_options

@@ -62,6 +62,7 @@ module ::LiveMetrics
       account.show_on_profile = false if account.show_on_profile.nil?
       account.show_in_directory = false if account.show_in_directory.nil?
       account.save!
+      ::LiveMetrics::ProviderAccount.activate_for_user!(account) unless ::LiveMetrics::ProviderAccount.where(user_id: current_user.id, active: true).exists?
 
       profile = ::LiveMetrics::PulsoidClient.profile(account)
       if profile.present?
@@ -89,8 +90,10 @@ module ::LiveMetrics
       )
 
       if account.present?
+        was_active = account.active?
         ::LiveMetrics::PulsoidClient.revoke(account)
         account.destroy!
+        ::LiveMetrics::ProviderAccount.activate_fallback_for_user!(current_user.id) if was_active
       end
 
       render json: { disconnected: true }, status: 200
