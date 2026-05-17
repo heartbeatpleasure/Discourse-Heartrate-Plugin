@@ -72,6 +72,8 @@ after_initialize do
     patch "/live-metrics/api/me/settings" => "live_metrics/api#update_me", defaults: { format: :json }
     put "/live-metrics/api/accounts/:provider/settings" => "live_metrics/api#update_account", defaults: { format: :json }
     patch "/live-metrics/api/accounts/:provider/settings" => "live_metrics/api#update_account", defaults: { format: :json }
+    put "/live-metrics/api/accounts/:provider/activate" => "live_metrics/api#activate_account", defaults: { format: :json }
+    patch "/live-metrics/api/accounts/:provider/activate" => "live_metrics/api#activate_account", defaults: { format: :json }
     get "/live-metrics/api/directory" => "live_metrics/api#directory", defaults: { format: :json }
     get "/live-metrics/api/users/:username" => "live_metrics/api#user", defaults: { format: :json }
   end

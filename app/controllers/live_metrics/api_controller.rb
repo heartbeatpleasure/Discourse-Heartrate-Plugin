@@ -7,7 +7,7 @@ module ::LiveMetrics
     skip_before_action :check_xhr, raise: false
 
     before_action :ensure_enabled
-    before_action :ensure_logged_in, only: %i[me me_live update_me update_account connect_hyperate disconnect_hyperate]
+    before_action :ensure_logged_in, only: %i[me me_live update_me update_account activate_account connect_hyperate disconnect_hyperate]
     before_action :ensure_logged_in, only: %i[plugin_config directory], if: -> { SiteSetting.live_metrics_require_login_to_view_page }
 
     # NOTE: do not name this action `config`; ActionController already has
@@ -65,15 +65,42 @@ module ::LiveMetrics
       return live_metrics_render_error("database_not_ready", status: 503, message: database_not_ready_message) unless provider_accounts_table_ready?
 
       provider = normalize_provider(params[:provider])
-      return live_metrics_render_error("invalid_provider", status: 422) if provider.blank?
+      return live_metrics_render_error("invalid_provider", status: 422, message: "Unknown heartrate provider.") if provider.blank?
 
       account = current_provider_account(provider)
-      return live_metrics_render_error("not_connected", status: 404) if account.blank?
+      return live_metrics_render_error("not_connected", status: 404, message: "This provider is not connected yet.") if account.blank?
 
       apply_account_settings!(account)
       return if performed?
 
       live_metrics_render_json(current_user_payload(include_live: false, include_statistics: false))
+    rescue ActiveRecord::RecordInvalid => e
+      Rails.logger.warn("[live_metrics] provider settings validation failed user_id=#{current_user&.id} provider=#{params[:provider]} error=#{e.class}: #{e.message}")
+      live_metrics_render_error("settings_validation_failed", status: 422, message: e.record&.errors&.full_messages&.to_sentence.presence || "Your heartrate settings could not be saved.")
+    rescue ActiveRecord::StatementInvalid, ActiveRecord::ActiveRecordError => e
+      Rails.logger.warn("[live_metrics] provider settings save failed user_id=#{current_user&.id} provider=#{params[:provider]} error=#{e.class}: #{e.message}")
+      live_metrics_render_error("settings_save_failed", status: 500, message: "Your heartrate settings could not be saved. Please ask staff to check the server logs.")
+    end
+
+    def activate_account
+      return live_metrics_render_error("database_not_ready", status: 503, message: database_not_ready_message) unless provider_accounts_table_ready?
+
+      provider = normalize_provider(params[:provider])
+      return live_metrics_render_error("invalid_provider", status: 422, message: "Unknown heartrate provider.") if provider.blank?
+
+      account = current_provider_account(provider)
+      return live_metrics_render_error("not_connected", status: 404, message: "Connect this provider before making it active.") if account.blank?
+      return live_metrics_render_error("provider_disabled", status: 422, message: "This provider is disabled by staff.") unless ::LiveMetrics.enabled_provider_names.include?(provider)
+      return live_metrics_render_error("provider_not_connected", status: 422, message: "Connect this provider before making it active.") unless account.connected?
+
+      ::LiveMetrics::ProviderAccount.activate_for_user!(account)
+      live_metrics_render_json(current_user_payload(include_live: false, include_statistics: false))
+    rescue ActiveRecord::RecordInvalid => e
+      Rails.logger.warn("[live_metrics] provider activation validation failed user_id=#{current_user&.id} provider=#{params[:provider]} error=#{e.class}: #{e.message}")
+      live_metrics_render_error("activation_validation_failed", status: 422, message: e.record&.errors&.full_messages&.to_sentence.presence || "The active heartrate provider could not be changed.")
+    rescue ActiveRecord::StatementInvalid, ActiveRecord::ActiveRecordError => e
+      Rails.logger.warn("[live_metrics] provider activation failed user_id=#{current_user&.id} provider=#{params[:provider]} error=#{e.class}: #{e.message}")
+      live_metrics_render_error("activation_failed", status: 500, message: "The active heartrate provider could not be changed. Please ask staff to check the server logs.")
     end
 
     def connect_hyperate

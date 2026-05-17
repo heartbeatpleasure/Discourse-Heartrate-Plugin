@@ -21,6 +21,48 @@ module ::LiveMetrics
     scope :enabled_providers, -> { where(provider: ::LiveMetrics.enabled_provider_names) }
     scope :directory_enabled, -> { where(show_in_directory: true) }
     scope :profile_enabled, -> { where(show_on_profile: true) }
+    scope :active, -> { where(active: true) }
+
+    def self.activate_for_user!(account)
+      return nil if account.blank?
+
+      now = Time.zone.now
+
+      transaction do
+        # Keep provider activation deliberately narrow and robust. Existing
+        # provider records have already passed validation when they were
+        # connected; activation should not fail because unrelated optional
+        # provider fields or transient validation state changed.
+        where(user_id: account.user_id).where.not(id: account.id).update_all(
+          active: false,
+          show_in_directory: false,
+          show_on_profile: false,
+          updated_at: now
+        )
+
+        if account.persisted?
+          account.update_columns(active: true, updated_at: now)
+        else
+          account.active = true
+          account.save!
+        end
+      end
+
+      account.reload
+    end
+
+    def self.ensure_active_for_user!(user_id)
+      return nil if user_id.blank?
+      return active.where(user_id: user_id).first if active.where(user_id: user_id).exists?
+
+      account = where(user_id: user_id, provider: ::LiveMetrics.enabled_provider_names).order(updated_at: :desc).first
+      activate_for_user!(account) if account.present?
+    end
+
+    def self.activate_fallback_for_user!(user_id)
+      account = where(user_id: user_id, provider: ::LiveMetrics.enabled_provider_names).order(updated_at: :desc).first
+      activate_for_user!(account) if account.present?
+    end
 
     def access_token
       ::LiveMetrics::TokenCipher.decrypt(access_token_cipher)
