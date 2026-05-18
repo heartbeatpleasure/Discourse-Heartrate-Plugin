@@ -363,15 +363,13 @@ module ::LiveMetrics
     end
 
     PROFILE_DETAIL_ALIASES = {
-      "age" => %w[age leeftijd],
-      "gender" => %w[gender geslacht],
-      "country" => %w[country land]
+      "age" => %w[age leeftijd birthdate birthday dateofbirth geboortedatum],
+      "gender" => %w[gender geslacht]
     }.freeze
 
     PROFILE_DETAIL_LABELS = {
       "age" => "Age",
-      "gender" => "Gender",
-      "country" => "Country"
+      "gender" => "Gender"
     }.freeze
 
     def public_user_profile_details(user)
@@ -382,10 +380,13 @@ module ::LiveMetrics
 
       custom_fields = user.custom_fields || {}
       fields_by_key.filter_map do |key, field|
-        value = custom_fields["user_field_#{field.id}"]
+        raw_value = custom_fields["user_field_#{field.id}"]
+        next if raw_value.blank?
+
+        value = public_profile_detail_value(key, raw_value)
         next if value.blank?
 
-        { key: key, label: PROFILE_DETAIL_LABELS[key] || field.name.to_s, value: value.to_s }
+        { key: key, label: PROFILE_DETAIL_LABELS[key] || field.name.to_s, value: value }
       end
     rescue => e
       Rails.logger.warn("[live_metrics] public profile detail lookup failed user_id=#{user&.id} error=#{e.class}: #{e.message}")
@@ -421,8 +422,40 @@ module ::LiveMetrics
     end
 
     def normalized_profile_detail_key(name)
-      normalized = name.to_s.downcase.strip
-      PROFILE_DETAIL_ALIASES.find { |_, aliases| aliases.include?(normalized) }&.first
+      normalized = name.to_s.downcase.gsub(/[^a-z0-9]+/, " ").strip
+      compact = normalized.gsub(/\s+/, "")
+
+      PROFILE_DETAIL_ALIASES.find do |_, aliases|
+        aliases.any? { |profile_alias| profile_alias == compact || profile_alias == normalized }
+      end&.first
+    end
+
+    def public_profile_detail_value(key, raw_value)
+      value = raw_value.to_s.strip
+      return nil if value.blank?
+
+      case key.to_s
+      when "age"
+        public_age_value(value)
+      when "gender"
+        value
+      else
+        nil
+      end
+    end
+
+    def public_age_value(value)
+      return value if value.match?(/\A\d{1,3}\z/)
+      return nil unless value.match?(/\d{4}/)
+
+      parsed_date = Date.parse(value)
+      today = Date.current
+      age = today.year - parsed_date.year
+      age -= 1 if today < parsed_date.change(year: today.year)
+
+      age.between?(0, 120) ? age.to_s : nil
+    rescue ArgumentError, TypeError
+      nil
     end
 
     def public_profile_payload(account)
