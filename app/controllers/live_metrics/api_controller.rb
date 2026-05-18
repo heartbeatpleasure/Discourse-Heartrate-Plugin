@@ -162,7 +162,10 @@ module ::LiveMetrics
       rows = accounts.filter_map do |account|
         next unless can_view_account?(account, surface: :directory)
 
-        account_payload(account, include_user: true, include_live: true, include_statistics: false, surface: :directory)
+        payload = account_payload(account, include_user: true, include_live: true, include_statistics: false, surface: :directory)
+        next unless directory_live_payload?(payload[:live])
+
+        payload
       end
 
       rows.sort_by! { |row| live_sort_key(row[:live]) }
@@ -354,8 +357,72 @@ module ::LiveMetrics
         username: user.username,
         name: user.name,
         avatar_template: user.avatar_template,
-        profile_url: "/u/#{user.username}"
+        profile_url: "/u/#{user.username}",
+        profile_details: public_user_profile_details(user)
       }
+    end
+
+    PROFILE_DETAIL_ALIASES = {
+      "age" => %w[age leeftijd],
+      "gender" => %w[gender geslacht],
+      "country" => %w[country land]
+    }.freeze
+
+    PROFILE_DETAIL_LABELS = {
+      "age" => "Age",
+      "gender" => "Gender",
+      "country" => "Country"
+    }.freeze
+
+    def public_user_profile_details(user)
+      return [] if user.blank? || !defined?(::UserField)
+
+      fields_by_key = profile_detail_user_fields
+      return [] if fields_by_key.blank?
+
+      custom_fields = user.custom_fields || {}
+      fields_by_key.filter_map do |key, field|
+        value = custom_fields["user_field_#{field.id}"]
+        next if value.blank?
+
+        { key: key, label: PROFILE_DETAIL_LABELS[key] || field.name.to_s, value: value.to_s }
+      end
+    rescue => e
+      Rails.logger.warn("[live_metrics] public profile detail lookup failed user_id=#{user&.id} error=#{e.class}: #{e.message}")
+      []
+    end
+
+    def profile_detail_user_fields
+      @profile_detail_user_fields ||= begin
+        fields = ::UserField.all.to_a
+        fields.each_with_object({}) do |field, memo|
+          next unless public_profile_detail_field?(field)
+
+          key = normalized_profile_detail_key(field.name)
+          next if key.blank? || memo.key?(key)
+
+          memo[key] = field
+        end.sort_by { |key, _| PROFILE_DETAIL_LABELS.keys.index(key) || 99 }.to_h
+      end
+    rescue => e
+      Rails.logger.warn("[live_metrics] profile detail user field lookup failed error=#{e.class}: #{e.message}")
+      {}
+    end
+
+    def public_profile_detail_field?(field)
+      visible_on_card =
+        (field.respond_to?(:show_on_user_card) && field.show_on_user_card) ||
+        (field.respond_to?(:show_on_user_card?) && field.show_on_user_card?)
+      visible_on_profile =
+        (field.respond_to?(:show_on_profile) && field.show_on_profile) ||
+        (field.respond_to?(:show_on_profile?) && field.show_on_profile?)
+
+      visible_on_card || visible_on_profile
+    end
+
+    def normalized_profile_detail_key(name)
+      normalized = name.to_s.downcase.strip
+      PROFILE_DETAIL_ALIASES.find { |_, aliases| aliases.include?(normalized) }&.first
     end
 
     def public_profile_payload(account)
@@ -458,6 +525,10 @@ module ::LiveMetrics
       else
         "Unavailable"
       end
+    end
+
+    def directory_live_payload?(live)
+      live&.dig(:status).to_s == "live" && live&.dig(:heart_rate).present?
     end
 
     def live_sort_key(live)
