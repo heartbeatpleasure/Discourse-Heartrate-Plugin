@@ -40,6 +40,7 @@ after_initialize do
   end
 
   require_relative "lib/live_metrics/token_cipher"
+  require_relative "lib/live_metrics/permissions"
   require_relative "lib/live_metrics/pulsoid_client"
   require_relative "lib/live_metrics/hyperate_client"
 

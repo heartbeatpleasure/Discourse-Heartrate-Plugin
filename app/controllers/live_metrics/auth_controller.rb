@@ -8,6 +8,7 @@ module ::LiveMetrics
 
     before_action :ensure_enabled
     before_action :ensure_logged_in
+    before_action :ensure_can_share, only: %i[pulsoid_start pulsoid_callback]
 
     def pulsoid_start
       unless ::LiveMetrics::PulsoidClient.configured?
@@ -103,6 +104,12 @@ module ::LiveMetrics
 
     def ensure_enabled
       raise Discourse::NotFound unless SiteSetting.live_metrics_enabled && SiteSetting.live_metrics_pulsoid_enabled
+    end
+
+    def ensure_can_share
+      return if ::LiveMetrics::Permissions.can_share?(guardian)
+
+      redirect_to live_metrics_page_url(error: "sharing_not_allowed")
     end
 
     def safe_oauth_error(value)

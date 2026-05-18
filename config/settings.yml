@@ -15,6 +15,22 @@ plugins:
     default: false
     client: false
 
+
+  live_metrics_viewer_groups:
+    default: ""
+    type: list
+    client: false
+
+  live_metrics_allowed_sharer_groups:
+    default: "trust_level_0"
+    type: list
+    client: false
+
+  live_metrics_allowed_visibility_options:
+    default: "private|logged_in|public|staff"
+    type: list
+    client: false
+
   live_metrics_directory_enabled:
     default: true
     client: true

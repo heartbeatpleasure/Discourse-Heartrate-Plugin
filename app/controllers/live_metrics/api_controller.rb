@@ -9,6 +9,8 @@ module ::LiveMetrics
     before_action :ensure_enabled
     before_action :ensure_logged_in, only: %i[me live_preview update_me update_account activate_account connect_hyperate disconnect_hyperate]
     before_action :ensure_logged_in, only: %i[plugin_config directory], if: -> { SiteSetting.live_metrics_require_login_to_view_page }
+    before_action :ensure_can_view, only: %i[plugin_config me live_preview directory user]
+    before_action :ensure_can_share, only: %i[update_me update_account activate_account connect_hyperate]
 
     # NOTE: do not name this action `config`; ActionController already has
     # a `config` method and Discourse plugin controllers can fail hard when
@@ -22,7 +24,11 @@ module ::LiveMetrics
         database_ready: provider_accounts_table_ready?,
         poll_interval_seconds: SiteSetting.live_metrics_poll_interval_seconds.to_i,
         providers: provider_config_payload,
-        visibility_options: visibility_options
+        visibility_options: visibility_options,
+        permissions: {
+          can_view: ::LiveMetrics::Permissions.can_view?(guardian),
+          can_share: ::LiveMetrics::Permissions.can_share?(guardian)
+        }
       )
     end
 
@@ -189,6 +195,20 @@ module ::LiveMetrics
       raise Discourse::NotFound unless SiteSetting.live_metrics_enabled
     end
 
+    def ensure_can_view
+      raise Discourse::NotFound unless ::LiveMetrics::Permissions.can_view?(guardian)
+    end
+
+    def ensure_can_share
+      return if ::LiveMetrics::Permissions.can_share?(guardian)
+
+      live_metrics_render_error(
+        "sharing_not_allowed",
+        status: 403,
+        message: "Your account is not allowed to connect or share heartrate data."
+      )
+    end
+
     def provider_config_payload
       {
         pulsoid: {
@@ -351,7 +371,11 @@ module ::LiveMetrics
     def apply_account_settings!(account)
       visibility = params[:visibility].to_s
       if visibility.present?
-        return live_metrics_render_error("invalid_visibility", status: 422) unless ::LiveMetrics::ProviderAccount::VISIBILITIES.include?(visibility)
+        allowed_visibility_ids = ::LiveMetrics::Permissions.visibility_option_ids
+        unless ::LiveMetrics::ProviderAccount::VISIBILITIES.include?(visibility) && allowed_visibility_ids.include?(visibility)
+          return live_metrics_render_error("invalid_visibility", status: 422, message: "Choose an available visibility option.")
+        end
+
         account.visibility = visibility
       end
 
@@ -371,6 +395,7 @@ module ::LiveMetrics
       return false unless ::LiveMetrics.enabled_provider_names.include?(account.provider)
       return true if current_user&.staff?
       return true if current_user.present? && account.user_id == current_user.id
+      return false unless ::LiveMetrics::Permissions.can_share_user?(account.user)
 
       case surface
       when :directory
@@ -392,12 +417,24 @@ module ::LiveMetrics
     end
 
     def visibility_options
-      [
-        { id: "private", label: "Only me" },
-        { id: "logged_in", label: "Logged-in users" },
-        { id: "public", label: "Public" },
-        { id: "staff", label: "Staff only" }
-      ]
+      ::LiveMetrics::Permissions.visibility_option_ids.map do |id|
+        { id: id, label: visibility_label(id) }
+      end
+    end
+
+    def visibility_label(id)
+      case id.to_s
+      when "private"
+        "Only me"
+      when "logged_in"
+        "Logged-in users"
+      when "public"
+        "Public"
+      when "staff"
+        "Staff only"
+      else
+        id.to_s.titleize
+      end
     end
 
     def boolean_param(key, default:)

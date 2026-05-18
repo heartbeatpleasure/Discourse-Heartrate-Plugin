@@ -1,0 +1,96 @@
+# frozen_string_literal: true
+
+module ::LiveMetrics
+  module Permissions
+    module_function
+
+    def enabled?
+      SiteSetting.live_metrics_enabled
+    end
+
+    # Discourse list site settings can be stored as an Array, a pipe-separated
+    # string, or pasted comma/newline-separated text. Keep this tolerant so admin
+    # settings behave like other group-list settings in our plugins.
+    def list_setting(value)
+      return value.map { |v| v.to_s.strip }.reject(&:blank?) if value.is_a?(Array)
+
+      value
+        .to_s
+        .split(/[|,\n]/)
+        .map { |v| v.to_s.strip }
+        .reject(&:blank?)
+    end
+
+    def viewer_groups
+      list_setting(SiteSetting.live_metrics_viewer_groups).map(&:downcase)
+    end
+
+    def sharer_groups
+      list_setting(SiteSetting.live_metrics_allowed_sharer_groups).map(&:downcase)
+    end
+
+    def visibility_option_ids
+      configured = list_setting(SiteSetting.live_metrics_allowed_visibility_options)
+        .map { |value| value.to_s.downcase.strip }
+        .select { |value| ::LiveMetrics::ProviderAccount::VISIBILITIES.include?(value) }
+        .uniq
+
+      configured.presence || ::LiveMetrics::ProviderAccount::VISIBILITIES
+    rescue => e
+      Rails.logger.warn("[live_metrics] visibility option setting check failed error=#{e.class}: #{e.message}")
+      ::LiveMetrics::ProviderAccount::VISIBILITIES
+    end
+
+    def user_in_any_group?(user, groups)
+      return false if user.nil? || groups.blank?
+
+      user.groups.where("lower(name) IN (?)", groups).exists?
+    end
+
+    def can_view?(guardian_or_user)
+      return false unless enabled?
+
+      user = extract_user(guardian_or_user)
+      return anonymous_can_view? if user.nil?
+
+      can_view_user?(user)
+    end
+
+    def can_view_user?(user)
+      return false unless enabled?
+      return false if user.nil?
+      return true if user.admin? || user.staff?
+
+      groups = viewer_groups
+      return true if groups.blank?
+
+      user_in_any_group?(user, groups)
+    end
+
+    def can_share?(guardian_or_user)
+      user = extract_user(guardian_or_user)
+      can_share_user?(user)
+    end
+
+    def can_share_user?(user)
+      return false unless can_view_user?(user)
+      return true if user.admin? || user.staff?
+
+      groups = sharer_groups
+      return true if groups.blank?
+
+      user_in_any_group?(user, groups)
+    end
+
+    def anonymous_can_view?
+      !SiteSetting.live_metrics_require_login_to_view_page && SiteSetting.live_metrics_allow_anonymous_public_view
+    end
+
+    def extract_user(guardian_or_user)
+      return nil if guardian_or_user.blank?
+      return guardian_or_user.user if guardian_or_user.respond_to?(:user)
+
+      guardian_or_user
+    end
+  end
+end
