@@ -101,6 +101,7 @@ module ::LiveMetrics
         [
           SiteSetting.live_metrics_hyperate_api_key.to_s,
           SiteSetting.live_metrics_hyperate_ws_url.to_s,
+          SiteSetting.live_metrics_hyperate_stream_stall_timeout_seconds.to_i,
         ].join("\0"),
       )
 
@@ -192,10 +193,15 @@ module ::LiveMetrics
 
     def publish_health(database)
       sessions = session_keys_for(database).filter_map { |key| @sessions[key] }
+      event_ages = sessions.filter_map(&:last_event_age_seconds)
       registry.publish_health(
         sessions: sessions.count,
         connected: sessions.count(&:connected?),
         reconnecting: sessions.count(&:reconnecting?),
+        stalled: sessions.count(&:stalled?),
+        oldest_event_age_seconds: event_ages.max,
+        reconnects: sessions.sum(&:reconnect_count),
+        stalls: sessions.sum(&:stall_count),
         limit: max_streams,
       )
     end

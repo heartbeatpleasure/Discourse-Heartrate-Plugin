@@ -159,6 +159,13 @@ plugins:
     max: 500
     client: false
 
+  live_metrics_hyperate_stream_stall_timeout_seconds:
+    default: 25
+    type: integer
+    min: 10
+    max: 120
+    client: false
+
   live_metrics_hyperate_read_timeout_seconds:
     default: 15
     type: integer

@@ -24,6 +24,9 @@ module ::LiveMetrics
     MAX_CONNECT_TIMEOUT_SECONDS = 10
     CONNECTION_TIMEOUT_GRACE_SECONDS = 3
     HEARTBEAT_INTERVAL_SECONDS = 15
+    DEFAULT_STREAM_STALL_TIMEOUT_SECONDS = 25
+    MIN_STREAM_STALL_TIMEOUT_SECONDS = 10
+    MAX_STREAM_STALL_TIMEOUT_SECONDS = 120
 
     class Error < StandardError
       attr_reader :status, :body
@@ -37,6 +40,7 @@ module ::LiveMetrics
 
     class Unauthorized < Error; end
     class NoHeartRateData < Error; end
+    class StreamStalled < NoHeartRateData; end
 
     # Preserves WebSocket bytes that arrive in the same packet as the HTTP 101
     # response. Without this buffer, an immediate join reply or heart-rate event
@@ -181,19 +185,30 @@ module ::LiveMetrics
       on_socket&.call(socket)
       send_text_frame(socket, join_message(device_id))
       on_connected&.call
-      next_heartbeat = monotonic_now + HEARTBEAT_INTERVAL_SECONDS
+
+      connected_at = monotonic_now
+      last_reading_at = connected_at
+      next_heartbeat = connected_at + HEARTBEAT_INTERVAL_SECONDS
+      stall_timeout = stream_stall_timeout_seconds
 
       until stop_if.call
         now = monotonic_now
+        stall_deadline = last_reading_at + stall_timeout
+        raise StreamStalled.new(stream_stalled_message(stall_timeout)) if now >= stall_deadline
+
         if now >= next_heartbeat
           send_text_frame(socket, heartbeat_message)
           on_heartbeat&.call
           next_heartbeat = now + HEARTBEAT_INTERVAL_SECONDS
         end
 
+        read_deadline = [next_heartbeat, stall_deadline].min
         begin
-          message = read_message(socket, next_heartbeat)
+          message = read_message(socket, read_deadline)
         rescue Timeout::Error
+          now = monotonic_now
+          raise StreamStalled.new(stream_stalled_message(stall_timeout)) if now >= stall_deadline
+
           next
         end
         next if message.blank?
@@ -216,6 +231,7 @@ module ::LiveMetrics
         heart_rate = payload.dig("payload", "hr")
         next unless valid_heart_rate?(heart_rate)
 
+        last_reading_at = monotonic_now
         on_reading.call(normalize_latest_response(heart_rate))
       end
 
@@ -579,6 +595,16 @@ module ::LiveMetrics
 
     def self.monotonic_now
       Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    end
+
+    def self.stream_stall_timeout_seconds
+      configured = SiteSetting.live_metrics_hyperate_stream_stall_timeout_seconds.to_i
+      configured = DEFAULT_STREAM_STALL_TIMEOUT_SECONDS if configured <= 0
+      configured.clamp(MIN_STREAM_STALL_TIMEOUT_SECONDS, MAX_STREAM_STALL_TIMEOUT_SECONDS)
+    end
+
+    def self.stream_stalled_message(timeout_seconds)
+      "No valid HypeRate heart-rate update was received for #{timeout_seconds.to_i} seconds; reconnecting the stream."
     end
 
     def self.read_timeout_seconds

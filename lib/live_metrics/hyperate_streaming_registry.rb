@@ -111,12 +111,16 @@ module ::LiveMetrics
 
       def publish_health(payload)
         sanitized = {
-          v: 1,
+          v: 2,
           pid: Process.pid,
           updated_at_ms: (Time.now.to_f * 1000).to_i,
           sessions: payload[:sessions].to_i,
           connected: payload[:connected].to_i,
           reconnecting: payload[:reconnecting].to_i,
+          stalled: payload[:stalled].to_i,
+          oldest_event_age_seconds: payload[:oldest_event_age_seconds]&.to_i,
+          reconnects: payload[:reconnects].to_i,
+          stalls: payload[:stalls].to_i,
           limit: payload[:limit].to_i,
         }
 

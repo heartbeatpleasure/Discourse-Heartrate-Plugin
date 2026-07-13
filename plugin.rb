@@ -71,6 +71,7 @@ after_initialize do
       live_metrics_hyperate_enabled
       live_metrics_hyperate_streaming_enabled
       live_metrics_hyperate_max_streams
+      live_metrics_hyperate_stream_stall_timeout_seconds
       live_metrics_hyperate_api_key
       live_metrics_hyperate_ws_url
     ].include?(name)

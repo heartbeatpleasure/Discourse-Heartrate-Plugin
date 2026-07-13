@@ -21,7 +21,10 @@ module ::LiveMetrics
       @socket = nil
       @mutex = Mutex.new
       @status = :starting
-      @last_event_at = nil
+      @last_event_monotonic = nil
+      @stalled = false
+      @reconnect_count = 0
+      @stall_count = 0
       @known_last_error = :unknown
     end
 
@@ -86,6 +89,25 @@ module ::LiveMetrics
       %i[starting connecting reconnecting].include?(status)
     end
 
+    def stalled?
+      @mutex.synchronize { @stalled }
+    end
+
+    def last_event_age_seconds
+      event_at = @mutex.synchronize { @last_event_monotonic }
+      return nil if event_at.nil?
+
+      [(monotonic_now - event_at).floor, 0].max
+    end
+
+    def reconnect_count
+      @mutex.synchronize { @reconnect_count }
+    end
+
+    def stall_count
+      @mutex.synchronize { @stall_count }
+    end
+
     private
 
     def run
@@ -113,7 +135,7 @@ module ::LiveMetrics
 
                 received_reading = true
                 reconnect_attempt = 0
-                @last_event_at = Time.now
+                record_reading_received
                 registry.touch_session(account_id, token)
                 write_reading(payload)
                 sync_last_error(snapshot, nil)
@@ -124,6 +146,7 @@ module ::LiveMetrics
             break if stop_requested? || !session_current?
 
             set_status(:reconnecting)
+            record_reconnect
             reconnect_attempt += 1 unless received_reading
             sleep_interruptibly(reconnect_delay(reconnect_attempt))
           rescue ::LiveMetrics::HypeRateClient::Unauthorized => e
@@ -134,8 +157,18 @@ module ::LiveMetrics
               "[live_metrics] HypeRate streaming authorization failed account_id=#{account_id} error=#{e.class}: #{e.message}",
             )
             sleep_interruptibly(UNAUTHORIZED_RETRY_SECONDS)
+          rescue ::LiveMetrics::HypeRateClient::StreamStalled => e
+            set_status(:reconnecting)
+            record_reconnect(stalled: true)
+            write_error_state("no_data")
+            reconnect_attempt += 1
+            Rails.logger.warn(
+              "[live_metrics] HypeRate streaming watchdog reconnect account_id=#{account_id} error=#{e.class}: #{e.message}",
+            )
+            sleep_interruptibly(reconnect_delay(reconnect_attempt))
           rescue ::LiveMetrics::HypeRateClient::NoHeartRateData => e
             set_status(:reconnecting)
+            record_reconnect
             write_error_state("no_data")
             reconnect_attempt += 1
             Rails.logger.warn(
@@ -146,6 +179,7 @@ module ::LiveMetrics
             break if stop_requested? || !session_current?
 
             set_status(:reconnecting)
+            record_reconnect
             write_error_state("unavailable")
             reconnect_attempt += 1
             Rails.logger.warn(
@@ -156,6 +190,7 @@ module ::LiveMetrics
             break if stop_requested? || !session_current?
 
             set_status(:reconnecting)
+            record_reconnect
             write_error_state("unavailable")
             reconnect_attempt += 1
             log_failure("run", e)
@@ -235,6 +270,28 @@ module ::LiveMetrics
       )
     ensure
       clear_active_connections
+    end
+
+    def record_reading_received
+      now = monotonic_now
+      @mutex.synchronize do
+        @last_event_monotonic = now
+        @stalled = false
+      end
+    end
+
+    def record_reconnect(stalled: false)
+      @mutex.synchronize do
+        @reconnect_count += 1
+        if stalled
+          @stall_count += 1
+          @stalled = true
+        end
+      end
+    end
+
+    def monotonic_now
+      Process.clock_gettime(Process::CLOCK_MONOTONIC)
     end
 
     def reconnect_delay(attempt)
