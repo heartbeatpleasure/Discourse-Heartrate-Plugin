@@ -19,6 +19,8 @@ RSpec.describe LiveMetrics::RefreshCoordinator do
     Jobs.stubs(:enqueue)
     SiteSetting.live_metrics_enabled = true
     SiteSetting.live_metrics_hyperate_enabled = true
+    SiteSetting.live_metrics_hyperate_api_key = "test-key"
+    SiteSetting.live_metrics_hyperate_streaming_enabled = false
     SiteSetting.live_metrics_async_current_readings_enabled = true
     described_class.stop(account)
   end
@@ -96,4 +98,52 @@ RSpec.describe LiveMetrics::RefreshCoordinator do
   ensure
     described_class.release_fetch_lock(account, lock_token) if lock_token
   end
+  it "moves HypeRate out of Sidekiq while streaming mode is enabled" do
+    SiteSetting.live_metrics_hyperate_streaming_enabled = true
+    described_class.expects(:enqueue_refresh).never
+
+    result = described_class.start(account)
+
+    expect(result).to be_nil
+    expect(described_class.streaming_eligible?(account)).to eq(true)
+    expect(described_class.eligible?(account)).to eq(false)
+    expect(described_class.current_generation(account)).to be_nil
+  end
+
+  it "preserves a streaming reading during routine recovery sync" do
+    SiteSetting.live_metrics_hyperate_streaming_enabled = true
+    LiveMetrics::CurrentStateStore.write(
+      account,
+      status: "live",
+      heart_rate: 83,
+      measured_at_ms: (Time.zone.now.to_f * 1000).to_i,
+    )
+
+    described_class.sync_user(user.id)
+
+    expect(LiveMetrics::CurrentStateStore.read(account)[:heart_rate]).to eq(83)
+  end
+
+  it "keeps Pulsoid on the existing background refresh path" do
+    pulsoid_user = Fabricate(:user)
+    pulsoid = LiveMetrics::ProviderAccount.create!(
+      user: pulsoid_user,
+      provider: LiveMetrics::ProviderAccount::PROVIDER_PULSOID,
+      visibility: "private",
+      active: true,
+      access_token_cipher: "encrypted-access",
+      refresh_token_cipher: "encrypted-refresh",
+      show_on_profile: false,
+      show_on_user_card: false,
+      show_in_directory: false,
+    )
+    SiteSetting.live_metrics_pulsoid_enabled = true
+    SiteSetting.live_metrics_hyperate_streaming_enabled = true
+
+    expect(described_class.streaming_eligible?(pulsoid)).to eq(false)
+    expect(described_class.eligible?(pulsoid)).to eq(true)
+  ensure
+    described_class.stop(pulsoid) if pulsoid
+  end
+
 end

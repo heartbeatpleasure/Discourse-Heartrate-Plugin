@@ -30,17 +30,46 @@ module ::LiveMetrics
         false
       end
 
-      def eligible?(account)
-        return false unless async_enabled?
+      def hyperate_streaming_enabled?
+        async_enabled? &&
+          SiteSetting.live_metrics_hyperate_enabled &&
+          SiteSetting.live_metrics_hyperate_streaming_enabled &&
+          ::LiveMetrics::HypeRateClient.configured?
+      rescue
+        false
+      end
+
+      def streaming_eligible?(account)
+        return false unless hyperate_streaming_enabled?
         return false if account.blank? || !account.persisted?
-        return false unless account.active? && account.connected?
+        return false unless account.hyperate? && account.active? && account.connected?
 
         ::LiveMetrics.enabled_provider_names.include?(account.provider)
       rescue
         false
       end
 
+      # Eligibility for the legacy/background refresh chain. HypeRate accounts
+      # move out of Sidekiq while the dedicated streaming collector is enabled;
+      # Pulsoid deliberately remains on the existing proven background path.
+      def eligible?(account)
+        return false unless async_enabled?
+        return false if account.blank? || !account.persisted?
+        return false unless account.active? && account.connected?
+        return false unless ::LiveMetrics.enabled_provider_names.include?(account.provider)
+        return false if streaming_eligible?(account)
+
+        true
+      rescue
+        false
+      end
+
       def start(account, replace: false)
+        if streaming_eligible?(account)
+          stop(account, clear_state: false, invalidate_stream: false)
+          return nil
+        end
+
         return stop(account) unless eligible?(account)
 
         generation = SecureRandom.hex(16)
@@ -67,6 +96,14 @@ module ::LiveMetrics
       def restart(account)
         return nil if account.blank?
 
+        if streaming_eligible?(account)
+          # Invalidating the session token makes the collector close and replace
+          # the socket without allowing the old connection to write another
+          # reading after a device or credential change.
+          stop(account, clear_state: true, clear_fetch_lock: false)
+          return nil
+        end
+
         # Invalidate the old generation and remove its state immediately, but do
         # not drop an in-flight fetch lock. The old job cannot be cancelled, and
         # retaining its lock prevents a reconnect from briefly running two
@@ -76,13 +113,21 @@ module ::LiveMetrics
         start(account, replace: true)
       end
 
-      def stop(account_or_id, clear_state: true, clear_fetch_lock: true)
+      def stop(
+        account_or_id,
+        clear_state: true,
+        clear_fetch_lock: true,
+        invalidate_stream: true
+      )
         account_id = account_id_for(account_or_id)
         return false if account_id.blank?
 
         keys = [loop_key(account_id)]
         keys << fetch_lock_key(account_id) if clear_fetch_lock
         redis.del(*keys)
+        if invalidate_stream && defined?(::LiveMetrics::HypeRateStreamingRegistry)
+          ::LiveMetrics::HypeRateStreamingRegistry.invalidate_session(account_id)
+        end
         ::LiveMetrics::CurrentStateStore.delete(account_id) if clear_state
         true
       rescue => e
@@ -96,7 +141,7 @@ module ::LiveMetrics
         return unless provider_accounts_table_ready?
 
         ::LiveMetrics::ProviderAccount.where(user_id: user_id.to_i).find_each do |account|
-          eligible?(account) ? start(account) : stop(account)
+          sync_account(account)
         end
       rescue => e
         Rails.logger.warn(
@@ -108,7 +153,7 @@ module ::LiveMetrics
         return unless provider_accounts_table_ready?
 
         ::LiveMetrics::ProviderAccount.find_each do |account|
-          eligible?(account) ? start(account) : stop(account)
+          sync_account(account)
         end
       rescue => e
         Rails.logger.warn(
@@ -240,6 +285,24 @@ module ::LiveMetrics
       end
 
       private
+
+      def sync_account(account)
+        if streaming_eligible?(account)
+          # Only remove the obsolete Sidekiq loop. The streaming collector owns
+          # the current Redis reading and must not be invalidated by recovery or
+          # an unrelated visibility/settings update.
+          stop(
+            account,
+            clear_state: false,
+            clear_fetch_lock: true,
+            invalidate_stream: false,
+          )
+        elsif eligible?(account)
+          start(account)
+        else
+          stop(account)
+        end
+      end
 
       def redis
         Discourse.redis

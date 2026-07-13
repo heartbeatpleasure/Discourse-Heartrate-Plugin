@@ -46,7 +46,11 @@ after_initialize do
 
   require_dependency File.expand_path("app/models/live_metrics/provider_account.rb", __dir__)
   require_relative "lib/live_metrics/current_state_store"
+  require_relative "lib/live_metrics/hyperate_streaming_registry"
   require_relative "lib/live_metrics/refresh_coordinator"
+  require_relative "lib/live_metrics/hyperate_streaming_session"
+  require_relative "lib/live_metrics/hyperate_streaming_supervisor"
+  require_relative "lib/live_metrics/hyperate_streaming_demon"
   require_dependency File.expand_path(
     "app/jobs/regular/live_metrics/refresh_provider_account.rb",
     __dir__,
@@ -65,10 +69,16 @@ after_initialize do
       live_metrics_async_current_readings_enabled
       live_metrics_pulsoid_enabled
       live_metrics_hyperate_enabled
+      live_metrics_hyperate_streaming_enabled
+      live_metrics_hyperate_max_streams
+      live_metrics_hyperate_api_key
+      live_metrics_hyperate_ws_url
     ].include?(name)
 
     ::LiveMetrics::RefreshCoordinator.sync_all
   end
+
+  register_demon_process(::LiveMetrics::HypeRateStreamingDemon)
 
   Discourse::Application.routes.append do
     get "/live-metrics" => "live_metrics/page#index"

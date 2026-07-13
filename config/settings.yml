@@ -144,8 +144,19 @@ plugins:
     client: false
 
   live_metrics_hyperate_ws_url:
-    default: "wss://app.hyperate.io/socket/websocket"
+    default: "wss://app.hyperate.io/ws/:deviceId"
     type: string
+    client: false
+
+  live_metrics_hyperate_streaming_enabled:
+    default: false
+    client: false
+
+  live_metrics_hyperate_max_streams:
+    default: 100
+    type: integer
+    min: 1
+    max: 500
     client: false
 
   live_metrics_hyperate_read_timeout_seconds:

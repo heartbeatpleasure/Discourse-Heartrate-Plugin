@@ -19,6 +19,7 @@ RSpec.describe Jobs::LiveMetrics::RefreshProviderAccount do
     Jobs.stubs(:enqueue)
     SiteSetting.live_metrics_enabled = true
     SiteSetting.live_metrics_hyperate_enabled = true
+    SiteSetting.live_metrics_hyperate_streaming_enabled = false
     SiteSetting.live_metrics_async_current_readings_enabled = true
     SiteSetting.live_metrics_provider_refresh_interval_seconds = 3
     LiveMetrics::RefreshCoordinator.stop(account)

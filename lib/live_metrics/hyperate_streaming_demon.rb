@@ -1,0 +1,29 @@
+# frozen_string_literal: true
+
+require_dependency "demon/base"
+
+module ::LiveMetrics
+  class HypeRateStreamingDemon < ::Demon::Base
+    def self.prefix
+      "live-metrics-hyperate-streaming"
+    end
+
+    def stop_timeout
+      15
+    end
+
+    def after_fork
+      supervisor = ::LiveMetrics::HypeRateStreamingSupervisor.new
+
+      Signal.trap("TERM") { supervisor.request_stop }
+      Signal.trap("INT") { supervisor.request_stop }
+
+      supervisor.run
+    rescue => e
+      Rails.logger.error(
+        "[live_metrics] HypeRate streaming demon stopped unexpectedly error=#{e.class}: #{e.message}",
+      )
+      raise
+    end
+  end
+end

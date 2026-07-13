@@ -7,13 +7,14 @@ require "openssl"
 require "securerandom"
 require "socket"
 require "timeout"
+require "time"
 require "uri"
 
 module ::LiveMetrics
   class HypeRateClient
     USER_AGENT = "Discourse Heartrate HypeRate/0.1"
     DEFAULT_WS_URL = "wss://app.hyperate.io/socket/websocket"
-    DEVICE_PATH_WS_URL = "wss://app.hyperate.io/ws"
+    DEVICE_PATH_WS_URL = "wss://app.hyperate.io/ws/:deviceId"
     LEGACY_SOCKET_PATH = "/socket/websocket"
     DEVICE_SOCKET_PATH = "/ws"
     DEFAULT_ORIGIN = "https://app.hyperate.io"
@@ -22,6 +23,7 @@ module ::LiveMetrics
     MAX_READ_TIMEOUT_SECONDS = 30
     MAX_CONNECT_TIMEOUT_SECONDS = 10
     CONNECTION_TIMEOUT_GRACE_SECONDS = 3
+    HEARTBEAT_INTERVAL_SECONDS = 15
 
     class Error < StandardError
       attr_reader :status, :body
@@ -35,6 +37,40 @@ module ::LiveMetrics
 
     class Unauthorized < Error; end
     class NoHeartRateData < Error; end
+
+    # Preserves WebSocket bytes that arrive in the same packet as the HTTP 101
+    # response. Without this buffer, an immediate join reply or heart-rate event
+    # can be consumed during the handshake and silently discarded.
+    class BufferedSocket
+      def initialize(socket, initial_bytes)
+        @socket = socket
+        @buffer = initial_bytes.to_s.b
+      end
+
+      def to_io
+        @socket
+      end
+
+      def readable_without_select?
+        @buffer.present?
+      end
+
+      def readpartial(max_length)
+        if @buffer.present?
+          return @buffer.slice!(0, max_length)
+        end
+
+        @socket.readpartial(max_length)
+      end
+
+      def write(*args)
+        @socket.write(*args)
+      end
+
+      def close
+        @socket.close
+      end
+    end
 
     def self.configured?
       SiteSetting.live_metrics_hyperate_enabled && SiteSetting.live_metrics_hyperate_api_key.to_s.strip.present?
@@ -84,6 +120,120 @@ module ::LiveMetrics
       Discourse.cache.fetch(cache_key, expires_in: SiteSetting.live_metrics_api_cache_seconds.seconds) do
         fetch_latest(account)
       end
+    end
+
+    # Keeps a HypeRate WebSocket open and yields every heart-rate event until
+    # stop_if returns true or the connection closes. This is used only by the
+    # dedicated streaming collector; the legacy single-read methods remain for
+    # rollback and for synchronous mode.
+    def self.stream(
+      device_id,
+      stop_if:,
+      on_reading:,
+      on_connected: nil,
+      on_heartbeat: nil,
+      on_socket: nil
+    )
+      raise Error.new("HypeRate is not configured.") unless configured?
+
+      device_id = normalize_device_id(device_id)
+      raise NoHeartRateData.new("Missing HypeRate device ID.") if device_id.blank?
+
+      last_error = nil
+
+      websocket_uri_candidates(device_id).each do |candidate|
+        begin
+          return stream_from_uri(
+            device_id,
+            candidate,
+            stop_if: stop_if,
+            on_reading: on_reading,
+            on_connected: on_connected,
+            on_heartbeat: on_heartbeat,
+            on_socket: on_socket,
+          )
+        rescue Unauthorized, Error => e
+          last_error = e
+          if fallback_allowed_for?(e)
+            Rails.logger.warn(
+              "[live_metrics] HypeRate streaming candidate failed endpoint=#{candidate[:name]} status=#{e.respond_to?(:status) ? e.status : nil} error=#{e.class}: #{e.message}",
+            )
+            next
+          end
+
+          raise
+        end
+      end
+
+      raise(last_error || Error.new("No HypeRate WebSocket endpoint was available."))
+    end
+
+    def self.stream_from_uri(
+      device_id,
+      candidate,
+      stop_if:,
+      on_reading:,
+      on_connected: nil,
+      on_heartbeat: nil,
+      on_socket: nil
+    )
+      socket = open_socket(candidate[:uri])
+      on_socket&.call(socket)
+      send_text_frame(socket, join_message(device_id))
+      on_connected&.call
+      next_heartbeat = monotonic_now + HEARTBEAT_INTERVAL_SECONDS
+
+      until stop_if.call
+        now = monotonic_now
+        if now >= next_heartbeat
+          send_text_frame(socket, heartbeat_message)
+          on_heartbeat&.call
+          next_heartbeat = now + HEARTBEAT_INTERVAL_SECONDS
+        end
+
+        begin
+          message = read_message(socket, next_heartbeat)
+        rescue Timeout::Error
+          next
+        end
+        next if message.blank?
+
+        payload = parse_json(message)
+        event = payload["event"].to_s
+
+        if event == "phx_reply" && payload.dig("payload", "status").to_s == "error"
+          reason =
+            payload.dig("payload", "response", "reason").presence ||
+              payload.dig("payload", "response", "message").presence ||
+              "HypeRate rejected the channel join."
+          raise Unauthorized.new(reason) if reason.to_s.match?(/auth|token|unauthor|forbid|reject|invalid/i)
+
+          raise Error.new(reason.to_s)
+        end
+
+        next unless event == "hr_update"
+
+        heart_rate = payload.dig("payload", "hr")
+        next unless valid_heart_rate?(heart_rate)
+
+        on_reading.call(normalize_latest_response(heart_rate))
+      end
+
+      true
+    ensure
+      begin
+        send_text_frame(socket, leave_message(device_id)) if socket
+      rescue
+        nil
+      end
+
+      begin
+        socket&.close
+      rescue
+        nil
+      end
+
+      on_socket&.call(nil)
     end
 
     def self.clear_last_error(account)
@@ -236,13 +386,13 @@ module ::LiveMetrics
       ].join("\r\n")
 
       socket.write(request)
-      response = read_http_response(socket)
+      response, remaining_bytes = read_http_response(socket)
       status = response[/\AHTTP\/\d\.\d\s+(\d+)/, 1].to_i
 
       raise Unauthorized.new("HypeRate authorization failed", status: status, body: safe_body(response)) if [401, 403].include?(status)
       raise Error.new("HypeRate WebSocket handshake failed", status: status, body: safe_body(response)) unless status == 101
 
-      socket
+      remaining_bytes.present? ? BufferedSocket.new(socket, remaining_bytes) : socket
     rescue
       begin
         socket&.close
@@ -325,8 +475,15 @@ module ::LiveMetrics
       }.to_json
     end
 
+    def self.heartbeat_message
+      {
+        event: "ping",
+        payload: { timestamp: (Time.now.to_f * 1000).to_i },
+      }.to_json
+    end
+
     def self.read_http_response(socket)
-      buffer = +""
+      buffer = +"".b
       deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + connect_timeout_seconds
 
       until buffer.include?("\r\n\r\n")
@@ -335,7 +492,11 @@ module ::LiveMetrics
         buffer << chunk
       end
 
-      buffer
+      header_end = buffer.index("\r\n\r\n")
+      return [buffer, +"".b] if header_end.blank?
+
+      header_length = header_end + 4
+      [buffer.byteslice(0, header_length), buffer.byteslice(header_length..-1).to_s.b]
     end
 
     def self.read_message(socket, deadline)
@@ -366,7 +527,7 @@ module ::LiveMetrics
         when 0x9
           send_frame(socket, opcode: 0xA, payload: payload)
         else
-          # Ignore binary, continuation and pong frames for this read-only PoC.
+          # Ignore binary, continuation and pong frames for this read-only stream.
         end
       end
     end
@@ -405,11 +566,13 @@ module ::LiveMetrics
     end
 
     def self.read_available(socket, deadline, max_length: 4096)
-      remaining = deadline - monotonic_now
-      raise Timeout::Error if remaining <= 0
+      unless socket.respond_to?(:readable_without_select?) && socket.readable_without_select?
+        remaining = deadline - monotonic_now
+        raise Timeout::Error if remaining <= 0
 
-      ready = IO.select([socket], nil, nil, remaining)
-      raise Timeout::Error if ready.blank?
+        ready = IO.select([socket], nil, nil, remaining)
+        raise Timeout::Error if ready.blank?
+      end
 
       socket.readpartial(max_length)
     end
