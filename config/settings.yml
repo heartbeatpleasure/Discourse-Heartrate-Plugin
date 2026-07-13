@@ -68,7 +68,7 @@ plugins:
     client: false
 
   live_metrics_live_threshold_seconds:
-    default: 12
+    default: 20
     type: integer
     min: 3
     max: 120
@@ -149,9 +149,9 @@ plugins:
     client: false
 
   live_metrics_hyperate_read_timeout_seconds:
-    default: 2
+    default: 15
     type: integer
     min: 2
-    max: 10
+    max: 30
     client: false
 

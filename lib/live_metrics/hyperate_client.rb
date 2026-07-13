@@ -18,6 +18,10 @@ module ::LiveMetrics
     DEVICE_SOCKET_PATH = "/ws"
     DEFAULT_ORIGIN = "https://app.hyperate.io"
     MAX_DEVICE_ID_LENGTH = 128
+    MIN_READ_TIMEOUT_SECONDS = 2
+    MAX_READ_TIMEOUT_SECONDS = 30
+    MAX_CONNECT_TIMEOUT_SECONDS = 10
+    CONNECTION_TIMEOUT_GRACE_SECONDS = 3
 
     class Error < StandardError
       attr_reader :status, :body
@@ -140,14 +144,20 @@ module ::LiveMetrics
     end
 
     def self.read_latest_heart_rate_from_uri(device_id, candidate)
-      timeout_seconds = SiteSetting.live_metrics_hyperate_read_timeout_seconds.to_i
-      timeout_seconds = 4 if timeout_seconds <= 0
-      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout_seconds
+      read_timeout = read_timeout_seconds
       socket = nil
 
-      Timeout.timeout(timeout_seconds + 2) do
+      # The setting is a data-read timeout, not a combined TCP/TLS/handshake
+      # timeout. Start the heart-rate deadline only after the socket is open and
+      # the channel join has been sent, otherwise connection setup can consume a
+      # meaningful part of HypeRate's normal ~10 second update cadence.
+      total_timeout =
+        connect_timeout_seconds + read_timeout + CONNECTION_TIMEOUT_GRACE_SECONDS
+
+      Timeout.timeout(total_timeout) do
         socket = open_socket(candidate[:uri])
         send_text_frame(socket, join_message(device_id))
+        deadline = monotonic_now + read_timeout
 
         loop do
           message = read_message(socket, deadline)
@@ -196,7 +206,7 @@ module ::LiveMetrics
     end
 
     def self.open_socket(uri)
-      tcp = Socket.tcp(uri.host, uri.port || 443, connect_timeout: SiteSetting.live_metrics_hyperate_read_timeout_seconds.to_i.clamp(2, 10))
+      tcp = Socket.tcp(uri.host, uri.port || 443, connect_timeout: connect_timeout_seconds)
 
       socket = tcp
       if uri.scheme == "wss"
@@ -317,7 +327,7 @@ module ::LiveMetrics
 
     def self.read_http_response(socket)
       buffer = +""
-      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + SiteSetting.live_metrics_hyperate_read_timeout_seconds.to_i.clamp(2, 10)
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + connect_timeout_seconds
 
       until buffer.include?("\r\n\r\n")
         chunk = read_available(socket, deadline)
@@ -395,13 +405,27 @@ module ::LiveMetrics
     end
 
     def self.read_available(socket, deadline, max_length: 4096)
-      remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      remaining = deadline - monotonic_now
       raise Timeout::Error if remaining <= 0
 
       ready = IO.select([socket], nil, nil, remaining)
       raise Timeout::Error if ready.blank?
 
       socket.readpartial(max_length)
+    end
+
+    def self.monotonic_now
+      Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    end
+
+    def self.read_timeout_seconds
+      configured = SiteSetting.live_metrics_hyperate_read_timeout_seconds.to_i
+      configured = 15 if configured <= 0
+      configured.clamp(MIN_READ_TIMEOUT_SECONDS, MAX_READ_TIMEOUT_SECONDS)
+    end
+
+    def self.connect_timeout_seconds
+      read_timeout_seconds.clamp(MIN_READ_TIMEOUT_SECONDS, MAX_CONNECT_TIMEOUT_SECONDS)
     end
 
     def self.valid_heart_rate?(value)

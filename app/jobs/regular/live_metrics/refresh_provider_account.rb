@@ -9,6 +9,7 @@ module Jobs
 
       MAX_BACKOFF_SECONDS = 60
       MIN_NO_DATA_DELAY_SECONDS = 5
+      HYPERATE_NO_DATA_RETRY_SECONDS = 1
       LOCK_RETRY_DELAY_SECONDS = 2
 
       def execute(args)
@@ -53,7 +54,7 @@ module Jobs
           if generation_still_valid?(account, generation)
             persist_provider_state(account, provider_state, generation)
             sync_account_error_state(account, provider_state, generation)
-            next_delay, next_attempt = next_schedule(provider_state, duration, attempt)
+            next_delay, next_attempt = next_schedule(account, provider_state, duration, attempt)
           end
         rescue => e
           duration = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
@@ -63,7 +64,7 @@ module Jobs
 
           if generation_still_valid?(account, generation)
             persist_provider_state(account, unavailable_state, generation)
-            next_delay, next_attempt = next_schedule(unavailable_state, duration, attempt)
+            next_delay, next_attempt = next_schedule(account, unavailable_state, duration, attempt)
           end
         ensure
           coordinator.release_fetch_lock(account_id, lock_token)
@@ -175,7 +176,7 @@ module Jobs
           (state[:measured_at_ms].to_i.positive? || state[:measured_at].present?)
       end
 
-      def next_schedule(provider_state, duration, attempt)
+      def next_schedule(account, provider_state, duration, attempt)
         status = provider_state&.with_indifferent_access&.dig(:status).to_s
         target_interval = [SiteSetting.live_metrics_provider_refresh_interval_seconds.to_i, 1].max
 
@@ -185,11 +186,19 @@ module Jobs
         when "unauthorized"
           [MAX_BACKOFF_SECONDS, [attempt + 1, 10].min]
         when "no_data"
-          next_attempt = [attempt + 1, 10].min
-          [
-            [target_interval, exponential_backoff(next_attempt, base: MIN_NO_DATA_DELAY_SECONDS)].max,
-            next_attempt,
-          ]
+          if account&.hyperate?
+            # A HypeRate read timeout usually means the next provider event fell
+            # just outside this socket's read window. It is not evidence of a
+            # broken connection and must not trigger exponential backoff, or a
+            # healthy stream can remain delayed for tens of seconds.
+            [HYPERATE_NO_DATA_RETRY_SECONDS, 0]
+          else
+            next_attempt = [attempt + 1, 10].min
+            [
+              [target_interval, exponential_backoff(next_attempt, base: MIN_NO_DATA_DELAY_SECONDS)].max,
+              next_attempt,
+            ]
+          end
         else
           next_attempt = [attempt + 1, 10].min
           [exponential_backoff(next_attempt, base: 5, jitter: true), next_attempt]

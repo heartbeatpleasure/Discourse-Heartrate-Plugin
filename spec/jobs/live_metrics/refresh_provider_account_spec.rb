@@ -144,6 +144,25 @@ RSpec.describe Jobs::LiveMetrics::RefreshProviderAccount do
     expect(LiveMetrics::CurrentStateStore.read(account)[:heart_rate]).to eq(84)
   end
 
+  it "retries HypeRate no_data quickly without exponential backoff" do
+    generation = LiveMetrics::RefreshCoordinator.start(account)
+    LiveMetrics::HypeRateClient.stubs(:fetch_latest).returns(
+      status: "no_data",
+      heart_rate: nil,
+      measured_at_ms: nil,
+    )
+    LiveMetrics::RefreshCoordinator
+      .expects(:enqueue_refresh)
+      .with(account.id, generation, delay_seconds: 1, attempt: 0)
+      .returns(true)
+
+    described_class.new.execute(
+      account_id: account.id,
+      generation: generation,
+      attempt: 4,
+    )
+  end
+
   it "reschedules the current generation when an older fetch still owns the lock" do
     generation = LiveMetrics::RefreshCoordinator.start(account)
     lock_token = LiveMetrics::RefreshCoordinator.acquire_fetch_lock(account)
