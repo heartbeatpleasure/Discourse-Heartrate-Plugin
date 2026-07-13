@@ -58,6 +58,10 @@ module ::LiveMetrics
         user_id: current_user.id,
         provider: ::LiveMetrics::ProviderAccount::PROVIDER_PULSOID
       )
+      if account.persisted? && ::LiveMetrics::RefreshCoordinator.async_enabled?
+        ::LiveMetrics::RefreshCoordinator.stop(account, clear_fetch_lock: false)
+      end
+
       ::LiveMetrics::PulsoidClient.apply_token_payload!(account, token_payload)
       account.visibility ||= "private"
       account.show_on_profile = false if account.show_on_profile.nil?
@@ -74,6 +78,11 @@ module ::LiveMetrics
         account.last_profile_synced_at = Time.zone.now
         account.save!
       end
+
+      if ::LiveMetrics::RefreshCoordinator.async_enabled?
+        ::LiveMetrics::RefreshCoordinator.start(account, replace: true)
+      end
+      ::LiveMetrics::RefreshCoordinator.sync_user(current_user.id)
 
       redirect_to live_metrics_page_url(connected: "pulsoid")
     rescue => e
@@ -93,9 +102,11 @@ module ::LiveMetrics
 
       if account.present?
         was_active = account.active?
+        ::LiveMetrics::RefreshCoordinator.stop(account)
         ::LiveMetrics::PulsoidClient.revoke(account)
         account.destroy!
         activate_fallback_account_for_user! if was_active
+        ::LiveMetrics::RefreshCoordinator.sync_user(current_user.id)
       end
 
       render json: { disconnected: true }, status: 200

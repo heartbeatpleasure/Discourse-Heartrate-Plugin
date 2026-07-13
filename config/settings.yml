@@ -49,6 +49,17 @@ plugins:
     max: 60
     client: true
 
+  live_metrics_provider_refresh_interval_seconds:
+    default: 3
+    type: integer
+    min: 1
+    max: 60
+    client: false
+
+  live_metrics_async_current_readings_enabled:
+    default: false
+    client: false
+
   live_metrics_api_cache_seconds:
     default: 1
     type: integer

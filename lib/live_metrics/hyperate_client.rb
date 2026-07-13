@@ -49,28 +49,71 @@ module ::LiveMetrics
       id.present? && id.match?(/\A[a-zA-Z0-9_\-:.]+\z/)
     end
 
-    def self.latest(account)
+    # Performs one uncached HypeRate WebSocket read. Background refresh jobs use
+    # this method; `latest` remains as the legacy cached synchronous wrapper for
+    # rollback while the async current-reading feature flag is disabled.
+    def self.fetch_latest(account, persist_last_error: true)
       return { status: "unavailable", heart_rate: nil, measured_at: nil, measured_at_ms: nil, error: "HypeRate is not configured." } unless configured?
 
       device_id = normalize_device_id(account.provider_uid)
       return { status: "no_data", heart_rate: nil, measured_at: nil, measured_at_ms: nil, error: "Missing HypeRate device ID." } if device_id.blank?
 
-      cache_key = "live_metrics:hyperate:latest:v2:#{account.id}:#{device_id}:#{account.updated_at.to_i}"
-      Discourse.cache.fetch(cache_key, expires_in: SiteSetting.live_metrics_api_cache_seconds.seconds) do
-        begin
-          account.update_columns(last_error: nil) if account.last_error.present?
-          normalize_latest_response(read_latest_heart_rate(device_id))
-        rescue Unauthorized => e
-          account.update_columns(last_error: "unauthorized", updated_at: Time.zone.now) rescue nil
-          { status: "unauthorized", heart_rate: nil, measured_at: nil, measured_at_ms: nil, error: unauthorized_message(e) }
-        rescue NoHeartRateData => e
-          account.update_columns(last_error: nil) if account.last_error.present? rescue nil
-          { status: "no_data", heart_rate: nil, measured_at: nil, measured_at_ms: nil, error: e.message }
-        rescue => e
-          Rails.logger.warn("[live_metrics] HypeRate latest failed account_id=#{account.id} device_id=#{device_id} error=#{e.class}: #{e.message}")
-          { status: "unavailable", heart_rate: nil, measured_at: nil, measured_at_ms: nil, error: "HypeRate data is temporarily unavailable." }
-        end
+      begin
+        clear_last_error(account) if persist_last_error
+        normalize_latest_response(read_latest_heart_rate(device_id))
+      rescue Unauthorized => e
+        persist_unauthorized(account) if persist_last_error
+        { status: "unauthorized", heart_rate: nil, measured_at: nil, measured_at_ms: nil, error: unauthorized_message(e) }
+      rescue NoHeartRateData => e
+        clear_last_error(account) if persist_last_error
+        { status: "no_data", heart_rate: nil, measured_at: nil, measured_at_ms: nil, error: e.message }
+      rescue => e
+        Rails.logger.warn("[live_metrics] HypeRate latest failed account_id=#{account.id} error=#{e.class}: #{e.message}")
+        { status: "unavailable", heart_rate: nil, measured_at: nil, measured_at_ms: nil, error: "HypeRate data is temporarily unavailable." }
       end
+    end
+
+    def self.latest(account)
+      device_id = normalize_device_id(account.provider_uid)
+      cache_key = "live_metrics:hyperate:latest:v2:#{account.id}:#{device_id}:#{account.updated_at.to_i}"
+
+      Discourse.cache.fetch(cache_key, expires_in: SiteSetting.live_metrics_api_cache_seconds.seconds) do
+        fetch_latest(account)
+      end
+    end
+
+    def self.clear_last_error(account)
+      return if account.last_error.blank?
+
+      updated =
+        account.class
+          .where(
+            id: account.id,
+            updated_at: account.updated_at,
+            provider_uid: account.provider_uid,
+          )
+          .update_all(last_error: nil)
+      account.last_error = nil if updated == 1
+    rescue ActiveRecord::ActiveRecordError
+      nil
+    end
+
+    def self.persist_unauthorized(account)
+      now = Time.zone.now
+      updated =
+        account.class
+          .where(
+            id: account.id,
+            updated_at: account.updated_at,
+            provider_uid: account.provider_uid,
+          )
+          .update_all(last_error: "unauthorized", updated_at: now)
+      if updated == 1
+        account.last_error = "unauthorized"
+        account.updated_at = now
+      end
+    rescue ActiveRecord::ActiveRecordError
+      nil
     end
 
     def self.read_latest_heart_rate(device_id)

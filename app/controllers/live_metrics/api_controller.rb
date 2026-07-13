@@ -3,6 +3,7 @@
 module ::LiveMetrics
   class ApiController < ::ApplicationController
     USER_CARD_BATCH_LIMIT = 50
+    LIVE_PAYLOAD_UNSET = Object.new.freeze
 
     requires_plugin ::LiveMetrics::PLUGIN_NAME
 
@@ -94,6 +95,7 @@ module ::LiveMetrics
       return live_metrics_render_error("provider_disabled", status: 404, message: "This provider is currently disabled.") unless ::LiveMetrics.enabled_provider_names.include?(provider)
 
       account.activate!
+      ::LiveMetrics::RefreshCoordinator.sync_user(current_user.id)
       live_metrics_render_json(current_user_payload(include_live: false, include_statistics: false))
     rescue ActiveRecord::RecordInvalid => e
       live_metrics_render_error("activate_failed", status: 422, message: e.record.errors.full_messages.join(", ").presence || "The active provider could not be changed.")
@@ -115,6 +117,10 @@ module ::LiveMetrics
         provider: ::LiveMetrics::ProviderAccount::PROVIDER_HYPERATE
       )
 
+      if account.persisted? && ::LiveMetrics::RefreshCoordinator.async_enabled?
+        ::LiveMetrics::RefreshCoordinator.stop(account, clear_fetch_lock: false)
+      end
+
       account.provider_uid = device_id
       account.display_name = "HypeRate #{masked_device_id(device_id)}"
       account.profile_hash = { "device_id_last4" => device_id.last(4) }
@@ -129,6 +135,10 @@ module ::LiveMetrics
       account.last_error = nil
       account.save!
       account.activate!
+      if ::LiveMetrics::RefreshCoordinator.async_enabled?
+        ::LiveMetrics::RefreshCoordinator.start(account, replace: true)
+      end
+      ::LiveMetrics::RefreshCoordinator.sync_user(current_user.id)
 
       live_metrics_render_json(current_user_payload(include_live: false, include_statistics: false), status: 200)
     end
@@ -141,8 +151,10 @@ module ::LiveMetrics
         provider: ::LiveMetrics::ProviderAccount::PROVIDER_HYPERATE
       )
       was_active = account&.active?
+      ::LiveMetrics::RefreshCoordinator.stop(account) if account.present?
       account&.destroy!
       activate_fallback_account_for_user!(current_user) if was_active
+      ::LiveMetrics::RefreshCoordinator.sync_user(current_user.id)
 
       live_metrics_render_json(disconnected: true)
     end
@@ -161,14 +173,23 @@ module ::LiveMetrics
         .includes(:user)
         .order(updated_at: :desc)
         .limit(SiteSetting.live_metrics_directory_limit.to_i)
+        .to_a
 
-      rows = accounts.filter_map do |account|
-        next unless can_view_account?(account, surface: :directory)
+      visible_accounts = accounts.select { |account| can_view_account?(account, surface: :directory) }
+      live_by_account_id = live_payloads_for(visible_accounts)
 
-        payload = account_payload(account, include_user: true, include_live: true, include_statistics: false, surface: :directory)
-        next unless directory_live_payload?(payload[:live])
+      rows = visible_accounts.filter_map do |account|
+        live = live_by_account_id[account.id]
+        next unless directory_live_payload?(live)
 
-        payload
+        account_payload(
+          account,
+          include_user: true,
+          include_live: true,
+          include_statistics: false,
+          surface: :directory,
+          live_override: live,
+        )
       end
 
       rows.sort_by! { |row| live_sort_key(row[:live]) }
@@ -204,9 +225,31 @@ module ::LiveMetrics
         .order(updated_at: :desc)
         .each_with_object({}) { |account, memo| memo[account.user_id] ||= account }
 
+      visible_accounts = accounts_by_user_id.values.select do |account|
+        username_lower = account.user&.username_lower
+        next false if username_lower.blank?
+
+        (popup_usernames.include?(username_lower) && can_view_account?(account, surface: :user_card)) ||
+          (directory_usernames.include?(username_lower) && can_view_account?(account, surface: :directory))
+      end
+      live_by_account_id = live_payloads_for(visible_accounts)
       readings = []
-      append_user_card_readings!(readings, popup_usernames, users_by_username, accounts_by_user_id, :user_card)
-      append_user_card_readings!(readings, directory_usernames, users_by_username, accounts_by_user_id, :directory)
+      append_user_card_readings!(
+        readings,
+        popup_usernames,
+        users_by_username,
+        accounts_by_user_id,
+        live_by_account_id,
+        :user_card,
+      )
+      append_user_card_readings!(
+        readings,
+        directory_usernames,
+        users_by_username,
+        accounts_by_user_id,
+        live_by_account_id,
+        :directory,
+      )
 
       live_metrics_render_json(readings: readings, generated_at: Time.zone.now.iso8601)
     end
@@ -334,7 +377,8 @@ module ::LiveMetrics
       return if accounts.blank?
       return if accounts.any?(&:active?)
 
-      accounts.max_by(&:updated_at)&.activate!
+      activated = accounts.max_by(&:updated_at)&.activate!
+      ::LiveMetrics::RefreshCoordinator.sync_user(user.id) if activated.present?
     rescue => e
       Rails.logger.warn("[live_metrics] active provider check failed user_id=#{user&.id} error=#{e.class}: #{e.message}")
     end
@@ -351,8 +395,18 @@ module ::LiveMetrics
       Rails.logger.warn("[live_metrics] fallback provider activation failed user_id=#{user&.id} error=#{e.class}: #{e.message}")
     end
 
-    def account_payload(account, include_user:, include_live:, include_statistics:, surface:)
-      live = include_live ? live_payload(account) : nil
+    def account_payload(
+      account,
+      include_user:,
+      include_live:,
+      include_statistics:,
+      surface:,
+      live_override: LIVE_PAYLOAD_UNSET
+    )
+      live =
+        if include_live
+          live_override.equal?(LIVE_PAYLOAD_UNSET) ? live_payload(account) : live_override
+        end
       payload = {
         provider: account.provider,
         provider_label: provider_label(account.provider),
@@ -382,6 +436,31 @@ module ::LiveMetrics
     end
 
     def live_payload(account)
+      if async_current_readings?
+        return decorate_async_live_payload(
+          account,
+          ::LiveMetrics::CurrentStateStore.read(account),
+        )
+      end
+
+      legacy_live_payload(account)
+    end
+
+    def live_payloads_for(accounts)
+      accounts = Array(accounts).compact.uniq { |account| account.id }
+      return {} if accounts.blank?
+
+      if async_current_readings?
+        states = ::LiveMetrics::CurrentStateStore.read_many(accounts)
+        return accounts.each_with_object({}) do |account, result|
+          result[account.id] = decorate_async_live_payload(account, states[account.id])
+        end
+      end
+
+      accounts.index_with { |account| legacy_live_payload(account) }
+    end
+
+    def legacy_live_payload(account)
       case account.provider
       when ::LiveMetrics::ProviderAccount::PROVIDER_PULSOID
         ::LiveMetrics::PulsoidClient.latest(account)
@@ -390,6 +469,41 @@ module ::LiveMetrics
       else
         { status: "unavailable", heart_rate: nil, measured_at: nil, measured_at_ms: nil }
       end
+    end
+
+    def decorate_async_live_payload(account, state)
+      live =
+        if state.present?
+          state.dup
+        else
+          {
+            status: "no_data",
+            heart_rate: nil,
+            measured_at: nil,
+            measured_at_ms: nil,
+            age_seconds: nil,
+            error_code: "no_data",
+          }
+        end
+
+      error = async_live_error(account.provider, live[:status])
+      live[:error] = error if error.present?
+      live
+    end
+
+    def async_live_error(provider, status)
+      case status.to_s
+      when "unauthorized"
+        provider.to_s == ::LiveMetrics::ProviderAccount::PROVIDER_HYPERATE ?
+          "HypeRate rejected the connection. Check the API key and device ID." :
+          "Pulsoid authorization has expired. Reconnect your Pulsoid account."
+      when "unavailable"
+        "#{provider_label(provider)} data is temporarily unavailable."
+      end
+    end
+
+    def async_current_readings?
+      ::LiveMetrics::RefreshCoordinator.async_enabled?
     end
 
     def user_payload(user)
@@ -574,7 +688,14 @@ module ::LiveMetrics
         .first(USER_CARD_BATCH_LIMIT)
     end
 
-    def append_user_card_readings!(rows, usernames, users_by_username, accounts_by_user_id, surface)
+    def append_user_card_readings!(
+      rows,
+      usernames,
+      users_by_username,
+      accounts_by_user_id,
+      live_by_account_id,
+      surface
+    )
       usernames.each do |username_lower|
         user = users_by_username[username_lower]
         next if user.blank?
@@ -582,7 +703,7 @@ module ::LiveMetrics
         account = accounts_by_user_id[user.id]
         next unless can_view_account?(account, surface: surface)
 
-        live = live_payload(account)
+        live = live_by_account_id[account.id]
         next unless directory_live_payload?(live)
         next unless live[:heart_rate].to_i.positive?
 

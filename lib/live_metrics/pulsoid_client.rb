@@ -22,6 +22,7 @@ module ::LiveMetrics
 
     class Unauthorized < Error; end
     class NoHeartRateData < Error; end
+    class StaleCredentials < Error; end
 
     def self.configured?
       SiteSetting.live_metrics_pulsoid_enabled &&
@@ -68,6 +69,7 @@ module ::LiveMetrics
     end
 
     def self.refresh!(account)
+      expected_refresh_token_cipher = account.refresh_token_cipher.to_s
       refresh_token = account.refresh_token
       raise Unauthorized.new("Missing Pulsoid refresh token") if refresh_token.blank?
 
@@ -80,8 +82,11 @@ module ::LiveMetrics
       )
 
       token_payload = parse_token_response!(response)
-      apply_token_payload!(account, token_payload)
-      account.save!
+      apply_refreshed_token_payload!(
+        account,
+        token_payload,
+        expected_refresh_token_cipher: expected_refresh_token_cipher,
+      )
       token_payload
     end
 
@@ -96,22 +101,31 @@ module ::LiveMetrics
       false
     end
 
-    def self.latest(account)
-      cache_key = "live_metrics:pulsoid:latest:v1:#{account.id}:#{account.updated_at.to_i}"
-      Discourse.cache.fetch(cache_key, expires_in: SiteSetting.live_metrics_api_cache_seconds.seconds) do
-        with_refreshed_token(account) do |token|
-          response = get_json(SiteSetting.live_metrics_pulsoid_latest_url, token: token)
-          normalize_latest_response(response)
-        end
+    # Performs one uncached provider request. Background refresh jobs use this
+    # method so web requests never wait for Pulsoid when async current readings
+    # are enabled. `latest` remains as the legacy, cached synchronous wrapper.
+    def self.fetch_latest(account, persist_last_error: true)
+      with_refreshed_token(account) do |token|
+        response = get_json(SiteSetting.live_metrics_pulsoid_latest_url, token: token)
+        clear_last_error(account) if persist_last_error
+        normalize_latest_response(response)
       end
     rescue NoHeartRateData
+      clear_last_error(account) if persist_last_error
       { status: "no_data", heart_rate: nil, measured_at: nil, measured_at_ms: nil }
     rescue Unauthorized => e
-      account.update_columns(last_error: "unauthorized", updated_at: Time.zone.now) rescue nil
+      persist_unauthorized(account) if persist_last_error
       { status: "unauthorized", heart_rate: nil, measured_at: nil, measured_at_ms: nil, error: e.message }
     rescue => e
       Rails.logger.warn("[live_metrics] Pulsoid latest failed account_id=#{account.id} error=#{e.class}: #{e.message}")
       { status: "unavailable", heart_rate: nil, measured_at: nil, measured_at_ms: nil, error: "Pulsoid data is temporarily unavailable." }
+    end
+
+    def self.latest(account)
+      cache_key = "live_metrics:pulsoid:latest:v1:#{account.id}:#{account.updated_at.to_i}"
+      Discourse.cache.fetch(cache_key, expires_in: SiteSetting.live_metrics_api_cache_seconds.seconds) do
+        fetch_latest(account)
+      end
     end
 
     def self.statistics(account, time_range: "24h")
@@ -135,6 +149,67 @@ module ::LiveMetrics
       end
     rescue => e
       Rails.logger.warn("[live_metrics] Pulsoid profile failed account_id=#{account.id} error=#{e.class}: #{e.message}")
+      nil
+    end
+
+    def self.apply_refreshed_token_payload!(account, payload, expected_refresh_token_cipher:)
+      now = Time.zone.now
+      attributes = {
+        access_token_cipher: ::LiveMetrics::TokenCipher.encrypt(payload.fetch("access_token")),
+        refresh_token_cipher: ::LiveMetrics::TokenCipher.encrypt(payload.fetch("refresh_token")),
+        token_expires_at: now + payload.fetch("expires_in").to_i.seconds,
+        scopes: scopes_from_token_payload(payload).join(" "),
+        last_error: nil,
+        updated_at: now,
+      }
+
+      updated =
+        account.class
+          .where(id: account.id, refresh_token_cipher: expected_refresh_token_cipher)
+          .update_all(attributes)
+
+      if updated != 1
+        raise StaleCredentials.new(
+          "Pulsoid credentials changed while a token refresh was in progress.",
+        )
+      end
+
+      account.reload
+    end
+
+    def self.clear_last_error(account)
+      return if account.last_error.blank?
+
+      updated =
+        account.class
+          .where(
+            id: account.id,
+            updated_at: account.updated_at,
+            access_token_cipher: account.access_token_cipher,
+            refresh_token_cipher: account.refresh_token_cipher,
+          )
+          .update_all(last_error: nil)
+      account.last_error = nil if updated == 1
+    rescue ActiveRecord::ActiveRecordError
+      nil
+    end
+
+    def self.persist_unauthorized(account)
+      now = Time.zone.now
+      updated =
+        account.class
+          .where(
+            id: account.id,
+            updated_at: account.updated_at,
+            access_token_cipher: account.access_token_cipher,
+            refresh_token_cipher: account.refresh_token_cipher,
+          )
+          .update_all(last_error: "unauthorized", updated_at: now)
+      if updated == 1
+        account.last_error = "unauthorized"
+        account.updated_at = now
+      end
+    rescue ActiveRecord::ActiveRecordError
       nil
     end
 

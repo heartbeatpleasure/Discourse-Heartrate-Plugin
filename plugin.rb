@@ -45,9 +45,30 @@ after_initialize do
   require_relative "lib/live_metrics/hyperate_client"
 
   require_dependency File.expand_path("app/models/live_metrics/provider_account.rb", __dir__)
+  require_relative "lib/live_metrics/current_state_store"
+  require_relative "lib/live_metrics/refresh_coordinator"
+  require_dependency File.expand_path(
+    "app/jobs/regular/live_metrics/refresh_provider_account.rb",
+    __dir__,
+  )
+  require_dependency File.expand_path(
+    "app/jobs/scheduled/live_metrics/recover_refresh_loops.rb",
+    __dir__,
+  )
   require_dependency File.expand_path("app/controllers/live_metrics/page_controller.rb", __dir__)
   require_dependency File.expand_path("app/controllers/live_metrics/auth_controller.rb", __dir__)
   require_dependency File.expand_path("app/controllers/live_metrics/api_controller.rb", __dir__)
+
+  on(:site_setting_changed) do |name, _old_value, _new_value|
+    next unless %i[
+      live_metrics_enabled
+      live_metrics_async_current_readings_enabled
+      live_metrics_pulsoid_enabled
+      live_metrics_hyperate_enabled
+    ].include?(name)
+
+    ::LiveMetrics::RefreshCoordinator.sync_all
+  end
 
   Discourse::Application.routes.append do
     get "/live-metrics" => "live_metrics/page#index"
