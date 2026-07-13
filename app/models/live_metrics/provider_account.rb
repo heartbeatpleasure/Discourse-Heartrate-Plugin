@@ -22,6 +22,7 @@ module ::LiveMetrics
     scope :active, -> { where(active: true) }
     scope :directory_enabled, -> { where(show_in_directory: true) }
     scope :profile_enabled, -> { where(show_on_profile: true) }
+    scope :user_card_enabled, -> { where(show_on_user_card: true) }
 
     def self.activate_for_user!(account)
       return nil if account.blank?

@@ -2,6 +2,8 @@
 
 module ::LiveMetrics
   class ApiController < ::ApplicationController
+    USER_CARD_BATCH_LIMIT = 50
+
     requires_plugin ::LiveMetrics::PLUGIN_NAME
 
     skip_before_action :check_xhr, raise: false
@@ -9,7 +11,7 @@ module ::LiveMetrics
     before_action :ensure_enabled
     before_action :ensure_logged_in, only: %i[me live_preview update_me update_account activate_account connect_hyperate disconnect_hyperate]
     before_action :ensure_logged_in, only: %i[plugin_config directory], if: -> { SiteSetting.live_metrics_require_login_to_view_page }
-    before_action :ensure_can_view, only: %i[plugin_config me live_preview directory user]
+    before_action :ensure_can_view, only: %i[plugin_config me live_preview directory user_cards user]
     before_action :ensure_can_share, only: %i[update_me update_account activate_account connect_hyperate]
 
     # NOTE: do not name this action `config`; ActionController already has
@@ -118,6 +120,7 @@ module ::LiveMetrics
       account.profile_hash = { "device_id_last4" => device_id.last(4) }
       account.visibility ||= "private"
       account.show_on_profile = false if account.show_on_profile.nil?
+      account.show_on_user_card = false if account.show_on_user_card.nil?
       account.show_in_directory = false if account.show_in_directory.nil?
       account.access_token_cipher = nil
       account.refresh_token_cipher = nil
@@ -170,6 +173,42 @@ module ::LiveMetrics
 
       rows.sort_by! { |row| live_sort_key(row[:live]) }
       live_metrics_render_json(users: rows, generated_at: Time.zone.now.iso8601)
+    end
+
+    # Returns a deliberately minimal, batched payload for user-card surfaces.
+    # Missing, stale, unauthorized, or non-opted-in readings are all omitted so
+    # the response does not reveal whether a user has connected a provider.
+    def user_cards
+      unless provider_accounts_table_ready?
+        return live_metrics_render_json(readings: [], generated_at: Time.zone.now.iso8601, database_ready: false)
+      end
+
+      popup_usernames = normalized_usernames_param(:usernames)
+      directory_usernames = normalized_usernames_param(:directory_usernames)
+      requested_usernames = (popup_usernames + directory_usernames).uniq.first(USER_CARD_BATCH_LIMIT)
+
+      if requested_usernames.blank?
+        return live_metrics_render_json(readings: [], generated_at: Time.zone.now.iso8601)
+      end
+
+      users_by_username = ::User
+        .where(username_lower: requested_usernames)
+        .select(:id, :username, :username_lower)
+        .index_by(&:username_lower)
+
+      accounts_by_user_id = ::LiveMetrics::ProviderAccount
+        .enabled_providers
+        .active
+        .where(user_id: users_by_username.values.map(&:id))
+        .includes(:user)
+        .order(updated_at: :desc)
+        .each_with_object({}) { |account, memo| memo[account.user_id] ||= account }
+
+      readings = []
+      append_user_card_readings!(readings, popup_usernames, users_by_username, accounts_by_user_id, :user_card)
+      append_user_card_readings!(readings, directory_usernames, users_by_username, accounts_by_user_id, :directory)
+
+      live_metrics_render_json(readings: readings, generated_at: Time.zone.now.iso8601)
     end
 
     def user
@@ -254,7 +293,8 @@ module ::LiveMetrics
     end
 
     def provider_accounts_table_ready?
-      ::LiveMetrics::ProviderAccount.table_exists? && ::LiveMetrics::ProviderAccount.column_names.include?("active")
+      ::LiveMetrics::ProviderAccount.table_exists? &&
+        %w[active show_on_user_card].all? { |column| ::LiveMetrics::ProviderAccount.column_names.include?(column) }
     rescue => e
       Rails.logger.warn("[live_metrics] provider account table check failed error=#{e.class}: #{e.message}")
       false
@@ -321,6 +361,7 @@ module ::LiveMetrics
         active: account.active?,
         visibility: account.visibility,
         show_on_profile: account.show_on_profile,
+        show_on_user_card: account.show_on_user_card,
         show_in_directory: account.show_in_directory,
         live: live,
         status_label: status_label(live),
@@ -480,6 +521,7 @@ module ::LiveMetrics
       end
 
       account.show_on_profile = boolean_param(:show_on_profile, default: account.show_on_profile)
+      account.show_on_user_card = boolean_param(:show_on_user_card, default: account.show_on_user_card)
       account.show_in_directory = boolean_param(:show_in_directory, default: account.show_in_directory)
       account.save!
     rescue ActiveRecord::RecordInvalid => e
@@ -493,16 +535,19 @@ module ::LiveMetrics
       return false unless account&.connected?
       return false unless account.active?
       return false unless ::LiveMetrics.enabled_provider_names.include?(account.provider)
-      return true if current_user&.staff?
-      return true if current_user.present? && account.user_id == current_user.id
-      return false unless ::LiveMetrics::Permissions.can_share_user?(account.user)
 
       case surface
       when :directory
         return false unless account.show_in_directory
       when :profile
         return false unless account.show_on_profile
+      when :user_card
+        return false unless account.show_on_user_card
       end
+
+      return true if current_user&.staff?
+      return true if current_user.present? && account.user_id == current_user.id
+      return false unless ::LiveMetrics::Permissions.can_share_user?(account.user)
 
       case account.visibility
       when "public"
@@ -514,6 +559,71 @@ module ::LiveMetrics
       else
         false
       end
+    end
+
+    def normalized_usernames_param(key)
+      raw_values = params[key]
+      values = raw_values.is_a?(Array) ? raw_values : [raw_values]
+
+      values
+        .compact
+        .flat_map { |value| value.to_s.split(/[|,\n]/) }
+        .map { |value| value.to_s.strip.downcase }
+        .reject(&:blank?)
+        .uniq
+        .first(USER_CARD_BATCH_LIMIT)
+    end
+
+    def append_user_card_readings!(rows, usernames, users_by_username, accounts_by_user_id, surface)
+      usernames.each do |username_lower|
+        user = users_by_username[username_lower]
+        next if user.blank?
+
+        account = accounts_by_user_id[user.id]
+        next unless can_view_account?(account, surface: surface)
+
+        live = live_payload(account)
+        next unless directory_live_payload?(live)
+        next unless live[:heart_rate].to_i.positive?
+
+        rows << user_card_live_payload(user, live, surface)
+      end
+    end
+
+    def user_card_live_payload(user, live, surface)
+      measured_at_ms = live[:measured_at_ms].to_i
+      if measured_at_ms <= 0 && live[:measured_at].present?
+        parsed_measured_at = Time.zone.parse(live[:measured_at].to_s)
+        measured_at_ms = (parsed_measured_at.to_f * 1000).to_i if parsed_measured_at
+      end
+      if measured_at_ms <= 0 && live[:age_seconds].present?
+        measured_at_ms = ((Time.zone.now.to_f - live[:age_seconds].to_i) * 1000).to_i
+      end
+
+      expires_at_ms =
+        if measured_at_ms.positive?
+          measured_at_ms + (SiteSetting.live_metrics_live_threshold_seconds.to_i * 1000)
+        end
+
+      {
+        username: user.username_lower,
+        surface: surface.to_s,
+        heart_rate: live[:heart_rate].to_i,
+        measured_at: live[:measured_at],
+        measured_at_ms: measured_at_ms.positive? ? measured_at_ms : nil,
+        age_seconds: live[:age_seconds],
+        expires_at_ms: expires_at_ms
+      }
+    rescue ArgumentError, TypeError, NoMethodError
+      {
+        username: user.username_lower,
+        surface: surface.to_s,
+        heart_rate: live[:heart_rate].to_i,
+        measured_at: live[:measured_at],
+        measured_at_ms: live[:measured_at_ms],
+        age_seconds: live[:age_seconds],
+        expires_at_ms: nil
+      }
     end
 
     def visibility_options

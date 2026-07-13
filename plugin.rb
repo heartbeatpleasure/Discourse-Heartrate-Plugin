@@ -76,6 +76,7 @@ after_initialize do
     patch "/live-metrics/api/accounts/:provider/activate" => "live_metrics/api#activate_account", defaults: { format: :json }
     get "/live-metrics/api/live-preview" => "live_metrics/api#live_preview", defaults: { format: :json }
     get "/live-metrics/api/directory" => "live_metrics/api#directory", defaults: { format: :json }
+    get "/live-metrics/api/user-cards" => "live_metrics/api#user_cards", defaults: { format: :json }
     get "/live-metrics/api/users/:username" => "live_metrics/api#user", defaults: { format: :json }
   end
 end

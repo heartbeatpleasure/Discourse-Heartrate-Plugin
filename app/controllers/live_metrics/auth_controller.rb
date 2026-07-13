@@ -61,6 +61,7 @@ module ::LiveMetrics
       ::LiveMetrics::PulsoidClient.apply_token_payload!(account, token_payload)
       account.visibility ||= "private"
       account.show_on_profile = false if account.show_on_profile.nil?
+      account.show_on_user_card = false if account.show_on_user_card.nil?
       account.show_in_directory = false if account.show_in_directory.nil?
       account.save!
       account.activate!
@@ -135,7 +136,8 @@ module ::LiveMetrics
     end
 
     def provider_accounts_table_ready?
-      ::LiveMetrics::ProviderAccount.table_exists? && ::LiveMetrics::ProviderAccount.column_names.include?("active")
+      ::LiveMetrics::ProviderAccount.table_exists? &&
+        %w[active show_on_user_card].all? { |column| ::LiveMetrics::ProviderAccount.column_names.include?(column) }
     rescue => e
       Rails.logger.warn("[live_metrics] provider account table check failed error=#{e.class}: #{e.message}")
       false
