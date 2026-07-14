@@ -4,16 +4,31 @@ RSpec.describe LiveMetrics::HypeRateStreamingSession do
   it "tracks transport stalls and clears them after a successful channel join" do
     session = described_class.new(database: "default", account_id: 1, fingerprint: "fingerprint")
 
-    session.send(:record_reconnect, stalled: true)
+    session.stubs(:current_time_ms).returns(1_000, 2_000)
+    session.send(:record_reconnect, reason: :transport_stalled, stalled: true)
 
     expect(session.stalled?).to eq(true)
     expect(session.reconnect_count).to eq(1)
     expect(session.stall_count).to eq(1)
+    expect(session.last_reconnect_reason).to eq("transport_stalled")
+    expect(session.last_reconnect_at_ms).to eq(1_000)
 
     session.send(:record_connected)
 
     expect(session.stalled?).to eq(false)
     expect(session.connected?).to eq(true)
+    expect(session.last_successful_join_at_ms).to eq(2_000)
+  end
+
+  it "records bounded retry reasons without changing the reconnect counter" do
+    session = described_class.new(database: "default", account_id: 1, fingerprint: "fingerprint")
+    session.stubs(:current_time_ms).returns(3_000)
+
+    session.send(:record_retry_reason, :authorization_failed)
+
+    expect(session.last_reconnect_reason).to eq("authorization_failed")
+    expect(session.last_reconnect_at_ms).to eq(3_000)
+    expect(session.reconnect_count).to eq(0)
   end
 
   it "tracks frames and heart-rate readings independently" do

@@ -6,6 +6,8 @@
 # authors: Chris
 # url: https://github.com
 
+add_admin_route "admin.live_metrics.title", "liveMetrics"
+
 enabled_site_setting :live_metrics_enabled
 
 module ::LiveMetrics
@@ -51,6 +53,7 @@ after_initialize do
   require_relative "lib/live_metrics/hyperate_streaming_session"
   require_relative "lib/live_metrics/hyperate_streaming_supervisor"
   require_relative "lib/live_metrics/hyperate_streaming_demon"
+  require_relative "lib/live_metrics/admin_health"
   require_dependency File.expand_path(
     "app/jobs/regular/live_metrics/refresh_provider_account.rb",
     __dir__,
@@ -62,6 +65,7 @@ after_initialize do
   require_dependency File.expand_path("app/controllers/live_metrics/page_controller.rb", __dir__)
   require_dependency File.expand_path("app/controllers/live_metrics/auth_controller.rb", __dir__)
   require_dependency File.expand_path("app/controllers/live_metrics/api_controller.rb", __dir__)
+  require_dependency File.expand_path("app/controllers/live_metrics/admin_health_controller.rb", __dir__)
 
   on(:site_setting_changed) do |name, _old_value, _new_value|
     next unless %i[
@@ -82,6 +86,12 @@ after_initialize do
   register_demon_process(::LiveMetrics::HypeRateStreamingDemon)
 
   Discourse::Application.routes.append do
+    get "/admin/plugins/live-metrics" => "admin/plugins#index", constraints: AdminConstraint.new
+    get "/admin/plugins/live-metrics-health" => "admin/plugins#index", constraints: AdminConstraint.new
+    get "/admin/plugins/live-metrics/health" => "live_metrics/admin_health#index",
+        defaults: { format: :json },
+        constraints: AdminConstraint.new
+
     get "/live-metrics" => "live_metrics/page#index"
 
     # Keep an API-prefixed connect alias because /live-metrics/api/* is known to

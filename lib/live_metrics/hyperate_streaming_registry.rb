@@ -11,6 +11,18 @@ module ::LiveMetrics
     SESSION_TTL_SECONDS = 30
     HEALTH_TTL_SECONDS = 15
 
+    RECONNECT_REASONS = %w[
+      none
+      stream_ended
+      transport_stalled
+      no_data
+      transport_error
+      authorization_failed
+      unexpected_error
+      unknown
+    ].freeze
+    JOIN_RESULTS = %w[none successful].freeze
+
     COMPARE_AND_EXPIRE_SCRIPT = <<~LUA.freeze
       if redis.call("GET", KEYS[1]) == ARGV[1] then
         return redis.call("EXPIRE", KEYS[1], ARGV[2])
@@ -110,13 +122,18 @@ module ::LiveMetrics
       end
 
       def publish_health(payload)
+        last_successful_join_at_ms = positive_integer(payload[:last_successful_join_at_ms])
+        last_reconnect_at_ms = positive_integer(payload[:last_reconnect_at_ms])
+
         sanitized = {
-          v: 3,
+          v: 4,
           pid: Process.pid,
-          updated_at_ms: (Time.now.to_f * 1000).to_i,
+          updated_at_ms: current_time_ms,
+          collector_started_at_ms: positive_integer(payload[:collector_started_at_ms]),
           sessions: payload[:sessions].to_i,
           connected: payload[:connected].to_i,
           reconnecting: payload[:reconnecting].to_i,
+          unauthorized: payload[:unauthorized].to_i,
           stalled: payload[:stalled].to_i,
           oldest_event_age_seconds: payload[:oldest_event_age_seconds]&.to_i,
           oldest_frame_age_seconds: payload[:oldest_frame_age_seconds]&.to_i,
@@ -125,6 +142,11 @@ module ::LiveMetrics
           reconnects: payload[:reconnects].to_i,
           stalls: payload[:stalls].to_i,
           limit: payload[:limit].to_i,
+          limit_reached: payload[:limit_reached] == true,
+          last_reconnect_reason: sanitize_reconnect_reason(payload[:last_reconnect_reason]),
+          last_reconnect_at_ms: last_reconnect_at_ms,
+          last_join_result: last_successful_join_at_ms.present? ? "successful" : "none",
+          last_successful_join_at_ms: last_successful_join_at_ms,
         }
 
         redis.set(HEALTH_KEY, JSON.generate(sanitized), ex: HEALTH_TTL_SECONDS)
@@ -133,10 +155,33 @@ module ::LiveMetrics
         nil
       end
 
+      def read_health
+        raw = redis.get(HEALTH_KEY)
+        return nil if raw.blank?
+
+        payload = JSON.parse(raw.to_s)
+        payload.is_a?(Hash) ? payload : nil
+      rescue JSON::ParserError, TypeError
+        nil
+      rescue => e
+        log_failure("health read", nil, e)
+        nil
+      end
+
       def clear_health
         redis.del(HEALTH_KEY)
       rescue
         nil
+      end
+
+      def sanitize_reconnect_reason(value)
+        normalized = value.to_s.strip
+        RECONNECT_REASONS.include?(normalized) ? normalized : "unknown"
+      end
+
+      def sanitize_join_result(value)
+        normalized = value.to_s.strip
+        JOIN_RESULTS.include?(normalized) ? normalized : "none"
       end
 
       def session_key(account_or_id)
@@ -174,6 +219,15 @@ module ::LiveMetrics
         value = account_or_id.respond_to?(:id) ? account_or_id.id : account_or_id
         id = value.to_i
         id.positive? ? id : nil
+      end
+
+      def positive_integer(value)
+        integer = value.to_i
+        integer.positive? ? integer : nil
+      end
+
+      def current_time_ms
+        (Time.now.to_f * 1000).to_i
       end
 
       def log_failure(operation, account_id, error)

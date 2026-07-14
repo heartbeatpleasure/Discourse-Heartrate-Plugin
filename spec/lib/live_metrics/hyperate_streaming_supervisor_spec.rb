@@ -8,6 +8,8 @@ RSpec.describe LiveMetrics::HypeRateStreamingSupervisor do
     SiteSetting.live_metrics_hyperate_stream_stall_timeout_seconds = 25
   end
 
+  after { LiveMetrics::HypeRateStreamingRegistry.clear_health }
+
   it "enforces the configured per-site stream limit" do
     3.times do |index|
       LiveMetrics::ProviderAccount.create!(
@@ -26,6 +28,28 @@ RSpec.describe LiveMetrics::HypeRateStreamingSupervisor do
 
     expect(desired.length).to eq(2)
     expect(desired.values).to all(include(:fingerprint))
+  end
+
+  it "marks health capacity reached when the configured limit is fully used" do
+    2.times do |index|
+      LiveMetrics::ProviderAccount.create!(
+        user: Fabricate(:user),
+        provider: LiveMetrics::ProviderAccount::PROVIDER_HYPERATE,
+        provider_uid: "capacity-device-#{index}",
+        visibility: "private",
+        active: true,
+        show_on_profile: false,
+        show_on_user_card: false,
+        show_in_directory: false,
+      )
+    end
+
+    supervisor = described_class.new
+    supervisor.send(:desired_accounts)
+    database = supervisor.send(:current_database)
+    supervisor.send(:publish_health, database)
+
+    expect(LiveMetrics::HypeRateStreamingRegistry.read_health["limit_reached"]).to eq(true)
   end
 
   it "uses a safety default that supports fifty concurrent streams" do

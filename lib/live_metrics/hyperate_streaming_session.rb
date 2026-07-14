@@ -28,6 +28,9 @@ module ::LiveMetrics
       @stall_count = 0
       @frame_count = 0
       @reading_count = 0
+      @last_successful_join_at_ms = nil
+      @last_reconnect_reason = "none"
+      @last_reconnect_at_ms = nil
       @known_last_error = :unknown
     end
 
@@ -96,6 +99,10 @@ module ::LiveMetrics
       @mutex.synchronize { @stalled }
     end
 
+    def unauthorized?
+      status == :unauthorized
+    end
+
     def last_event_age_seconds
       event_at = @mutex.synchronize { @last_event_monotonic }
       return nil if event_at.nil?
@@ -124,6 +131,18 @@ module ::LiveMetrics
 
     def stall_count
       @mutex.synchronize { @stall_count }
+    end
+
+    def last_successful_join_at_ms
+      @mutex.synchronize { @last_successful_join_at_ms }
+    end
+
+    def last_reconnect_reason
+      @mutex.synchronize { @last_reconnect_reason }
+    end
+
+    def last_reconnect_at_ms
+      @mutex.synchronize { @last_reconnect_at_ms }
     end
 
     private
@@ -168,11 +187,12 @@ module ::LiveMetrics
             break if stop_requested? || !session_current?
 
             set_status(:reconnecting)
-            record_reconnect
+            record_reconnect(reason: :stream_ended)
             reconnect_attempt += 1 unless received_reading
             sleep_interruptibly(reconnect_delay(reconnect_attempt))
           rescue ::LiveMetrics::HypeRateClient::Unauthorized => e
             set_status(:unauthorized)
+            record_retry_reason(:authorization_failed)
             write_error_state("unauthorized")
             sync_last_error(snapshot, "unauthorized")
             Rails.logger.warn(
@@ -181,7 +201,7 @@ module ::LiveMetrics
             sleep_interruptibly(UNAUTHORIZED_RETRY_SECONDS)
           rescue ::LiveMetrics::HypeRateClient::StreamStalled => e
             set_status(:reconnecting)
-            record_reconnect(stalled: true)
+            record_reconnect(reason: :transport_stalled, stalled: true)
             write_error_state("no_data")
             reconnect_attempt += 1
             Rails.logger.warn(
@@ -190,7 +210,7 @@ module ::LiveMetrics
             sleep_interruptibly(reconnect_delay(reconnect_attempt))
           rescue ::LiveMetrics::HypeRateClient::NoHeartRateData => e
             set_status(:reconnecting)
-            record_reconnect
+            record_reconnect(reason: :no_data)
             write_error_state("no_data")
             reconnect_attempt += 1
             Rails.logger.warn(
@@ -201,7 +221,7 @@ module ::LiveMetrics
             break if stop_requested? || !session_current?
 
             set_status(:reconnecting)
-            record_reconnect
+            record_reconnect(reason: :transport_error)
             write_error_state("unavailable")
             reconnect_attempt += 1
             Rails.logger.warn(
@@ -212,7 +232,7 @@ module ::LiveMetrics
             break if stop_requested? || !session_current?
 
             set_status(:reconnecting)
-            record_reconnect
+            record_reconnect(reason: :unexpected_error)
             write_error_state("unavailable")
             reconnect_attempt += 1
             log_failure("run", e)
@@ -295,9 +315,11 @@ module ::LiveMetrics
     end
 
     def record_connected
+      joined_at_ms = current_time_ms
       @mutex.synchronize do
         @status = :connected
         @stalled = false
+        @last_successful_join_at_ms = joined_at_ms
       end
     end
 
@@ -318,9 +340,14 @@ module ::LiveMetrics
       end
     end
 
-    def record_reconnect(stalled: false)
+    def record_reconnect(reason: :unknown, stalled: false)
+      reconnect_at_ms = current_time_ms
+      normalized_reason = registry.sanitize_reconnect_reason(reason)
+
       @mutex.synchronize do
         @reconnect_count += 1
+        @last_reconnect_reason = normalized_reason
+        @last_reconnect_at_ms = reconnect_at_ms
         if stalled
           @stall_count += 1
           @stalled = true
@@ -328,8 +355,22 @@ module ::LiveMetrics
       end
     end
 
+    def record_retry_reason(reason)
+      reconnect_at_ms = current_time_ms
+      normalized_reason = registry.sanitize_reconnect_reason(reason)
+
+      @mutex.synchronize do
+        @last_reconnect_reason = normalized_reason
+        @last_reconnect_at_ms = reconnect_at_ms
+      end
+    end
+
     def monotonic_now
       Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    end
+
+    def current_time_ms
+      (Time.now.to_f * 1000).to_i
     end
 
     def reconnect_delay(attempt)

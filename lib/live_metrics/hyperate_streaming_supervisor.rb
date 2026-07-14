@@ -15,6 +15,10 @@ module ::LiveMetrics
       @sessions = {}
       @leader_tokens = {}
       @overflow_logged = {}
+      @limit_reached = {}
+      @last_reconnect_events = {}
+      @last_successful_joins = {}
+      @collector_started_at_ms = (Time.now.to_f * 1000).to_i
     end
 
     def run
@@ -51,6 +55,7 @@ module ::LiveMetrics
         stop_database_sessions(database, clear_state: false)
         release_leader(database)
         registry.clear_health
+        clear_database_health_metadata(database)
         return
       end
 
@@ -94,6 +99,7 @@ module ::LiveMetrics
           .pluck(:id, :provider_uid)
 
       overflow = rows.length > limit
+      @limit_reached[current_database] = rows.length >= limit
       rows = rows.first(limit)
       log_overflow_once(overflow, limit)
 
@@ -195,10 +201,36 @@ module ::LiveMetrics
       sessions = session_keys_for(database).filter_map { |key| @sessions[key] }
       event_ages = sessions.filter_map(&:last_event_age_seconds)
       frame_ages = sessions.filter_map(&:last_frame_age_seconds)
+      current_reconnect =
+        sessions
+          .filter_map do |session|
+            occurred_at = session.last_reconnect_at_ms
+            next if occurred_at.blank?
+
+            [occurred_at, session.last_reconnect_reason]
+          end
+          .max_by(&:first)
+      database_key = database.to_s
+      remembered_reconnect = @last_reconnect_events[database_key]
+      if current_reconnect.present? &&
+           (remembered_reconnect.blank? || current_reconnect.first >= remembered_reconnect.first)
+        @last_reconnect_events[database_key] = current_reconnect
+      end
+      latest_reconnect = @last_reconnect_events[database_key]
+
+      current_join_at_ms = sessions.filter_map(&:last_successful_join_at_ms).max
+      if current_join_at_ms.present? &&
+           current_join_at_ms >= @last_successful_joins.fetch(database_key, 0).to_i
+        @last_successful_joins[database_key] = current_join_at_ms
+      end
+      last_successful_join_at_ms = @last_successful_joins[database_key]
+
       registry.publish_health(
+        collector_started_at_ms: @collector_started_at_ms,
         sessions: sessions.count,
         connected: sessions.count(&:connected?),
         reconnecting: sessions.count(&:reconnecting?),
+        unauthorized: sessions.count(&:unauthorized?),
         stalled: sessions.count(&:stalled?),
         oldest_event_age_seconds: event_ages.max,
         oldest_frame_age_seconds: frame_ages.max,
@@ -207,6 +239,10 @@ module ::LiveMetrics
         reconnects: sessions.sum(&:reconnect_count),
         stalls: sessions.sum(&:stall_count),
         limit: max_streams,
+        limit_reached: @limit_reached[database.to_s] == true,
+        last_reconnect_reason: latest_reconnect&.last || "none",
+        last_reconnect_at_ms: latest_reconnect&.first,
+        last_successful_join_at_ms: last_successful_join_at_ms,
       )
     end
 
@@ -218,6 +254,14 @@ module ::LiveMetrics
     def lose_leadership(database)
       stop_database_sessions(database, clear_state: false)
       @leader_tokens.delete(database)
+      clear_database_health_metadata(database)
+    end
+
+    def clear_database_health_metadata(database)
+      database_key = database.to_s
+      @limit_reached.delete(database_key)
+      @last_reconnect_events.delete(database_key)
+      @last_successful_joins.delete(database_key)
     end
 
     def release_leader(database)

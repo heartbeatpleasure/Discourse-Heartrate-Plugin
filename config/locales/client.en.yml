@@ -3,3 +3,175 @@ en:
     live_metrics:
       title: "Heartrate"
       nav_title: "Heartrate"
+
+  admin_js:
+    admin:
+      live_metrics:
+        title: "Heartrate"
+        description: "Admin tools for the Heartrate plugin."
+        open_settings: "Open settings"
+        overview_title: "Admin tools"
+        overview_description: "Choose a Heartrate admin area. Settings and operational health are kept together for easier administration."
+        settings_description: "Configure access, visibility, providers, refresh intervals, realtime streaming, and retention thresholds."
+        open_tool: "Open tool"
+        category_configuration: "Configuration"
+        category_monitoring: "Monitoring"
+
+        health:
+          title: "Heartrate health"
+          short_title: "Health"
+          description: "Review privacy-safe collector status, stream capacity, operational events, configuration, and latest-only storage behavior."
+          back_to_overview: "Back to overview"
+          refresh: "Refresh"
+          refreshing: "Refreshing…"
+          loading: "Loading Heartrate health…"
+          load_error: "Heartrate health could not be loaded. Check the browser console and Rails logs."
+          last_checked: "Last checked: %{time}"
+          not_available: "Not available"
+          enabled: "Enabled"
+          disabled: "Disabled"
+          "yes": "Yes"
+          "no": "No"
+          seconds: "%{count} s"
+          minutes_seconds: "%{minutes}m %{seconds}s"
+          status_title: "Operational status"
+          no_warnings: "No operational warnings were detected in the current health snapshot."
+          activity_title: "Collector activity"
+          activity_description: "Aggregate counters reported by the currently managed sessions. They may reset when a session is replaced or the collector restarts, and contain no heart-rate values or account identifiers."
+          operational_title: "Operational events"
+          operational_description: "Latest privacy-safe join and reconnect metadata, plus transport and event freshness."
+          configuration_title: "Configuration"
+          configuration_description: "Read-only values that determine how the current Heartrate acquisition paths operate. Secrets and endpoint URLs are intentionally omitted."
+          privacy_title: "Privacy and retention"
+          privacy_description: "Confirmation of the limited data model used for live readings and admin diagnostics."
+          privacy_note: "This admin endpoint does not return heart-rate values, usernames, device IDs, account IDs, tokens, API keys, or other provider credentials."
+
+          overall:
+            healthy:
+              label: "Healthy"
+              description: "The HypeRate collector is reporting current health and no operational warnings are active."
+            attention:
+              label: "Attention needed"
+              description: "The collector is available, but one or more conditions should be reviewed."
+            critical:
+              label: "Critical"
+              description: "The collector is missing or a condition is preventing normal realtime operation."
+            inactive:
+              label: "Inactive"
+              description: "Persistent HypeRate streaming is not currently expected to run with the active settings. Pulsoid may still use the background refresh path."
+
+          cards:
+            collector:
+              label: "Collector health"
+              running: "Reporting"
+              unavailable: "Unavailable"
+              inactive: "Not expected"
+              updated: "Updated %{age} ago"
+              no_health: "No current collector health snapshot is available."
+            sessions:
+              label: "Streaming sessions"
+              value: "%{connected} connected / %{sessions} total"
+              detail: "%{reconnecting} reconnecting, %{stalled} stalled, %{unauthorized} unauthorized"
+            capacity:
+              label: "Stream capacity"
+              reached: "The configured stream limit has been reached; additional eligible accounts must wait."
+              available: "Capacity is available within the configured safety limit."
+            accounts:
+              label: "Active provider accounts"
+              detail: "%{hyperate} HypeRate, %{pulsoid} Pulsoid"
+              unavailable: "Provider account counts could not be read."
+
+          activity:
+            frames: "WebSocket frames"
+            readings: "Valid reading events"
+            reconnects: "Reconnects"
+            stalls: "Transport stalls"
+
+          operational:
+            health_version: "Health payload version"
+            health_version_detail: "Version of the privacy-safe collector health contract currently being reported."
+            last_join_result: "Last join result"
+            last_reconnect_reason: "Last reconnect reason"
+            oldest_frame: "Oldest frame age"
+            oldest_frame_detail: "Age of the least-recent WebSocket frame among current sessions."
+            oldest_event: "Oldest event age"
+            oldest_event_detail: "Age of the least-recent valid reading event among current sessions; no reading value is included."
+            collector_started: "Collector started"
+            collector_started_detail: "Start time of the current dedicated collector process."
+
+          reconnect_reasons:
+            none: "No reconnect recorded"
+            stream_ended: "Stream ended"
+            transport_stalled: "Transport stalled"
+            no_data: "Provider stream ended without data"
+            transport_error: "Transport error"
+            authorization_failed: "Authorization failed"
+            unexpected_error: "Unexpected error"
+            unknown: "Unknown operational reason"
+
+          join_results:
+            none: "No successful join recorded"
+            successful: "Successful"
+
+          configuration:
+            plugin_enabled: "Heartrate plugin"
+            async_enabled: "Async current readings"
+            hyperate_enabled: "HypeRate provider"
+            streaming_enabled: "Persistent HypeRate streaming setting"
+            streaming_operational: "Persistent HypeRate streaming operational"
+            client_configured: "HypeRate client configured"
+            pulsoid_enabled: "Pulsoid provider"
+            max_streams: "Maximum HypeRate streams"
+            stall_timeout: "Transport stall timeout"
+            frontend_poll: "Frontend poll interval"
+            provider_refresh: "Background provider refresh interval"
+            live_threshold: "Live threshold"
+            stale_threshold: "Stale threshold"
+
+          privacy:
+            current_state: "Current reading state"
+            latest_only_redis: "Latest-only Redis state"
+            current_state_detail: "At most one current reading per provider account, with a hard TTL of %{seconds} seconds."
+            history: "Historical reading storage"
+            history_detail: "The plugin does not create a PostgreSQL or Redis history series of heart-rate readings."
+            health_payload: "Admin health payload"
+            aggregate_only: "Aggregate operational data only"
+            health_payload_detail: "Counts, ages, bounded status enums, and configuration booleans; no personal or credential data."
+
+          warnings:
+            plugin_disabled:
+              title: "Heartrate is disabled"
+              description: "The plugin is disabled, so realtime collection is not expected to run."
+            async_disabled:
+              title: "Async current readings are disabled"
+              description: "Persistent HypeRate streaming is enabled, but it cannot start until async current readings are enabled."
+            hyperate_disabled:
+              title: "HypeRate is disabled"
+              description: "Persistent HypeRate streaming is enabled, but the HypeRate provider itself is disabled."
+            hyperate_not_configured:
+              title: "HypeRate is not configured"
+              description: "Persistent streaming is requested, but the server-side HypeRate configuration is incomplete."
+            collector_health_missing:
+              title: "Collector health is unavailable"
+              description: "Streaming is expected, but no health snapshot is available. A healthy collector refreshes this snapshot continuously and it expires after %{critical_age_seconds} seconds."
+            collector_health_critical:
+              title: "Collector health is too old"
+              description: "The latest health snapshot is %{age_seconds} seconds old, exceeding the %{critical_age_seconds}-second critical threshold."
+            collector_health_stale:
+              title: "Collector health is delayed"
+              description: "The latest health snapshot is %{age_seconds} seconds old. Healthy snapshots are normally newer than %{warning_age_seconds} seconds."
+            stream_limit_reached:
+              title: "Stream limit reached"
+              description: "%{sessions} sessions are currently managed within a configured limit of %{limit}. All configured stream capacity is in use; additional eligible accounts cannot start until capacity becomes available."
+            stalled_sessions:
+              title: "Stalled sessions detected"
+              description: "%{count} session(s) are marked stalled by the transport watchdog."
+            unauthorized_sessions:
+              title: "Unauthorized sessions detected"
+              description: "%{count} session(s) cannot complete provider authorization. Review the server-side HypeRate configuration."
+            reconnecting_sessions:
+              title: "Sessions are reconnecting"
+              description: "%{count} session(s) are currently reconnecting. This can be transient; refresh the page to confirm recovery."
+            active_accounts_without_sessions:
+              title: "Active HypeRate accounts have no sessions"
+              description: "%{count} active HypeRate account(s) exist, but the collector currently reports zero managed sessions."
