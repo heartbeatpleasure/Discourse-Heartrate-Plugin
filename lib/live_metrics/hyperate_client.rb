@@ -13,8 +13,8 @@ require "uri"
 module ::LiveMetrics
   class HypeRateClient
     USER_AGENT = "Discourse Heartrate HypeRate/0.1"
-    DEFAULT_WS_URL = "wss://app.hyperate.io/socket/websocket"
     DEVICE_PATH_WS_URL = "wss://app.hyperate.io/ws/:deviceId"
+    LEGACY_WS_URL = "wss://app.hyperate.io/socket/websocket"
     LEGACY_SOCKET_PATH = "/socket/websocket"
     DEVICE_SOCKET_PATH = "/ws"
     DEFAULT_ORIGIN = "https://app.hyperate.io"
@@ -24,7 +24,9 @@ module ::LiveMetrics
     MAX_CONNECT_TIMEOUT_SECONDS = 10
     CONNECTION_TIMEOUT_GRACE_SECONDS = 3
     HEARTBEAT_INTERVAL_SECONDS = 15
-    DEFAULT_STREAM_STALL_TIMEOUT_SECONDS = 25
+    DEFAULT_STREAM_STALL_TIMEOUT_SECONDS = 45
+    JOIN_TIMEOUT_SECONDS = 10
+    MAX_MESSAGE_BYTES = 1_048_576
     MIN_STREAM_STALL_TIMEOUT_SECONDS = 10
     MAX_STREAM_STALL_TIMEOUT_SECONDS = 120
 
@@ -55,14 +57,20 @@ module ::LiveMetrics
         @socket
       end
 
+      # OpenSSL may already have decrypted bytes buffered internally even when
+      # IO.select reports the underlying file descriptor as not readable.
+      # Exposing this prevents complete WebSocket frames from waiting for a
+      # later network packet before they are parsed.
       def readable_without_select?
-        @buffer.present?
+        !@buffer.empty? || pending.positive?
+      end
+
+      def pending
+        @buffer.bytesize + underlying_pending
       end
 
       def readpartial(max_length)
-        if @buffer.present?
-          return @buffer.slice!(0, max_length)
-        end
+        return @buffer.slice!(0, max_length) unless @buffer.empty?
 
         @socket.readpartial(max_length)
       end
@@ -73,6 +81,16 @@ module ::LiveMetrics
 
       def close
         @socket.close
+      end
+
+      private
+
+      def underlying_pending
+        return 0 unless @socket.respond_to?(:pending)
+
+        @socket.pending.to_i
+      rescue IOError, SystemCallError, OpenSSL::SSL::SSLError
+        0
       end
     end
 
@@ -136,6 +154,7 @@ module ::LiveMetrics
       on_reading:,
       on_connected: nil,
       on_heartbeat: nil,
+      on_frame: nil,
       on_socket: nil
     )
       raise Error.new("HypeRate is not configured.") unless configured?
@@ -154,6 +173,7 @@ module ::LiveMetrics
             on_reading: on_reading,
             on_connected: on_connected,
             on_heartbeat: on_heartbeat,
+            on_frame: on_frame,
             on_socket: on_socket,
           )
         rescue Unauthorized, Error => e
@@ -179,22 +199,26 @@ module ::LiveMetrics
       on_reading:,
       on_connected: nil,
       on_heartbeat: nil,
+      on_frame: nil,
       on_socket: nil
     )
       socket = open_socket(candidate[:uri])
       on_socket&.call(socket)
       send_text_frame(socket, join_message(device_id))
-      on_connected&.call
 
       connected_at = monotonic_now
-      last_reading_at = connected_at
+      last_frame_at = connected_at
       next_heartbeat = connected_at + HEARTBEAT_INTERVAL_SECONDS
-      stall_timeout = stream_stall_timeout_seconds
+      transport_timeout = stream_stall_timeout_seconds
+      join_deadline = connected_at + JOIN_TIMEOUT_SECONDS
+      joined = false
 
       until stop_if.call
         now = monotonic_now
-        stall_deadline = last_reading_at + stall_timeout
-        raise StreamStalled.new(stream_stalled_message(stall_timeout)) if now >= stall_deadline
+        transport_deadline = last_frame_at + transport_timeout
+
+        raise StreamStalled.new(stream_stalled_message(transport_timeout)) if now >= transport_deadline
+        raise Error.new("HypeRate channel join timed out.") if !joined && now >= join_deadline
 
         if now >= next_heartbeat
           send_text_frame(socket, heartbeat_message)
@@ -202,12 +226,24 @@ module ::LiveMetrics
           next_heartbeat = now + HEARTBEAT_INTERVAL_SECONDS
         end
 
-        read_deadline = [next_heartbeat, stall_deadline].min
+        deadlines = [next_heartbeat, transport_deadline]
+        deadlines << join_deadline unless joined
+        read_deadline = deadlines.min
+
         begin
-          message = read_message(socket, read_deadline)
+          message =
+            read_message(
+              socket,
+              read_deadline,
+              on_frame: lambda do
+                last_frame_at = monotonic_now
+                on_frame&.call
+              end,
+            )
         rescue Timeout::Error
           now = monotonic_now
-          raise StreamStalled.new(stream_stalled_message(stall_timeout)) if now >= stall_deadline
+          raise StreamStalled.new(stream_stalled_message(transport_timeout)) if now >= transport_deadline
+          raise Error.new("HypeRate channel join timed out.") if !joined && now >= join_deadline
 
           next
         end
@@ -216,22 +252,37 @@ module ::LiveMetrics
         payload = parse_json(message)
         event = payload["event"].to_s
 
-        if event == "phx_reply" && payload.dig("payload", "status").to_s == "error"
-          reason =
-            payload.dig("payload", "response", "reason").presence ||
-              payload.dig("payload", "response", "message").presence ||
-              "HypeRate rejected the channel join."
-          raise Unauthorized.new(reason) if reason.to_s.match?(/auth|token|unauthor|forbid|reject|invalid/i)
+        if event == "phx_reply" && payload["ref"].to_s == "1"
+          status = payload.dig("payload", "status").to_s
+          if status == "error"
+            reason =
+              payload.dig("payload", "response", "reason").presence ||
+                payload.dig("payload", "response", "message").presence ||
+                "HypeRate rejected the channel join."
+            raise Unauthorized.new(reason) if reason.to_s.match?(/auth|token|unauthor|forbid|reject|invalid/i)
 
-          raise Error.new(reason.to_s)
+            raise Error.new(reason.to_s)
+          end
+
+          unless joined
+            joined = true
+            on_connected&.call
+          end
+          next
         end
 
         next unless event == "hr_update"
 
+        # A valid HR event proves the channel is joined even if the join reply
+        # and the first update were delivered in an unexpected order.
+        unless joined
+          joined = true
+          on_connected&.call
+        end
+
         heart_rate = payload.dig("payload", "hr")
         next unless valid_heart_rate?(heart_rate)
 
-        last_reading_at = monotonic_now
         on_reading.call(normalize_latest_response(heart_rate))
       end
 
@@ -426,9 +477,9 @@ module ::LiveMetrics
     def self.websocket_uri_candidates(device_id)
       configured_base = SiteSetting.live_metrics_hyperate_ws_url.to_s.strip
       bases = []
-      bases << configured_base if configured_base.present?
-      bases << DEFAULT_WS_URL
+      bases << configured_base if configured_base.present? && configured_base != LEGACY_WS_URL
       bases << DEVICE_PATH_WS_URL
+      bases << LEGACY_WS_URL
 
       bases
         .compact
@@ -515,37 +566,76 @@ module ::LiveMetrics
       [buffer.byteslice(0, header_length), buffer.byteslice(header_length..-1).to_s.b]
     end
 
-    def self.read_message(socket, deadline)
+    def self.read_message(socket, deadline, on_frame: nil)
+      fragmented_opcode = nil
+      fragmented_payload = +"".b
+
       loop do
-        header = read_exact(socket, 2, deadline)
-        first = header.getbyte(0)
-        second = header.getbyte(1)
-        opcode = first & 0x0f
-        masked = (second & 0x80) != 0
-        length = second & 0x7f
-
-        length = read_exact(socket, 2, deadline).unpack1("n") if length == 126
-        length = read_exact(socket, 8, deadline).unpack1("Q>") if length == 127
-
-        mask = masked ? read_exact(socket, 4, deadline).bytes : nil
-        payload = length.positive? ? read_exact(socket, length, deadline) : +""
-
-        if masked && mask
-          bytes = payload.bytes
-          payload = bytes.each_with_index.map { |byte, index| (byte ^ mask[index % 4]).chr }.join
-        end
+        frame = read_frame(socket, deadline)
+        on_frame&.call
+        opcode = frame[:opcode]
+        payload = frame[:payload]
 
         case opcode
-        when 0x1
-          return payload.force_encoding("UTF-8")
+        when 0x0
+          next if fragmented_opcode.nil?
+
+          fragmented_payload << payload
+          ensure_message_size!(fragmented_payload.bytesize)
+          next unless frame[:fin]
+
+          complete_opcode = fragmented_opcode
+          fragmented_opcode = nil
+          complete_payload = fragmented_payload
+          fragmented_payload = +"".b
+          return complete_payload.force_encoding("UTF-8") if complete_opcode == 0x1
+        when 0x1, 0x2
+          if frame[:fin]
+            return payload.force_encoding("UTF-8") if opcode == 0x1
+          else
+            fragmented_opcode = opcode
+            fragmented_payload = payload.dup
+            ensure_message_size!(fragmented_payload.bytesize)
+          end
         when 0x8
-          raise NoHeartRateData.new("HypeRate closed the WebSocket before sending heart-rate data.")
+          raise NoHeartRateData.new("HypeRate closed the WebSocket stream.")
         when 0x9
           send_frame(socket, opcode: 0xA, payload: payload)
-        else
-          # Ignore binary, continuation and pong frames for this read-only stream.
+        when 0xA
+          # WebSocket pong; transport liveness is recorded by the caller.
         end
       end
+    end
+
+    def self.read_frame(socket, deadline)
+      header = read_exact(socket, 2, deadline)
+      first = header.getbyte(0)
+      second = header.getbyte(1)
+      fin = (first & 0x80) != 0
+      rsv = first & 0x70
+      opcode = first & 0x0f
+      masked = (second & 0x80) != 0
+      length = second & 0x7f
+
+      raise Error.new("HypeRate sent an unsupported compressed WebSocket frame.") if rsv != 0
+
+      length = read_exact(socket, 2, deadline).unpack1("n") if length == 126
+      length = read_exact(socket, 8, deadline).unpack1("Q>") if length == 127
+      ensure_message_size!(length)
+
+      mask = masked ? read_exact(socket, 4, deadline).bytes : nil
+      payload = length.positive? ? read_exact(socket, length, deadline) : +"".b
+
+      if masked && mask
+        payload =
+          payload.bytes.each_with_index.map { |byte, index| (byte ^ mask[index % 4]).chr }.join.b
+      end
+
+      { fin: fin, opcode: opcode, payload: payload }
+    end
+
+    def self.ensure_message_size!(size)
+      raise Error.new("HypeRate WebSocket message exceeded the safe size limit.") if size.to_i > MAX_MESSAGE_BYTES
     end
 
     def self.send_text_frame(socket, text)
@@ -582,7 +672,7 @@ module ::LiveMetrics
     end
 
     def self.read_available(socket, deadline, max_length: 4096)
-      unless socket.respond_to?(:readable_without_select?) && socket.readable_without_select?
+      unless readable_without_select?(socket)
         remaining = deadline - monotonic_now
         raise Timeout::Error if remaining <= 0
 
@@ -591,6 +681,16 @@ module ::LiveMetrics
       end
 
       socket.readpartial(max_length)
+    end
+
+    def self.readable_without_select?(socket)
+      if socket.respond_to?(:readable_without_select?) && socket.readable_without_select?
+        return true
+      end
+
+      socket.respond_to?(:pending) && socket.pending.to_i.positive?
+    rescue IOError, SystemCallError, OpenSSL::SSL::SSLError
+      false
     end
 
     def self.monotonic_now
@@ -604,7 +704,7 @@ module ::LiveMetrics
     end
 
     def self.stream_stalled_message(timeout_seconds)
-      "No valid HypeRate heart-rate update was received for #{timeout_seconds.to_i} seconds; reconnecting the stream."
+      "No HypeRate WebSocket frame or heartbeat response was received for #{timeout_seconds.to_i} seconds; reconnecting the stream."
     end
 
     def self.read_timeout_seconds

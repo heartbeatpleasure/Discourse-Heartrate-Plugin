@@ -22,9 +22,12 @@ module ::LiveMetrics
       @mutex = Mutex.new
       @status = :starting
       @last_event_monotonic = nil
+      @last_frame_monotonic = nil
       @stalled = false
       @reconnect_count = 0
       @stall_count = 0
+      @frame_count = 0
+      @reading_count = 0
       @known_last_error = :unknown
     end
 
@@ -100,6 +103,21 @@ module ::LiveMetrics
       [(monotonic_now - event_at).floor, 0].max
     end
 
+    def last_frame_age_seconds
+      frame_at = @mutex.synchronize { @last_frame_monotonic }
+      return nil if frame_at.nil?
+
+      [(monotonic_now - frame_at).floor, 0].max
+    end
+
+    def frame_count
+      @mutex.synchronize { @frame_count }
+    end
+
+    def reading_count
+      @mutex.synchronize { @reading_count }
+    end
+
     def reconnect_count
       @mutex.synchronize { @reconnect_count }
     end
@@ -128,8 +146,12 @@ module ::LiveMetrics
               snapshot[:device_id],
               stop_if: -> { stop_requested? || !session_current? },
               on_socket: ->(socket) { set_socket(socket) },
-              on_connected: -> { set_status(:connected) },
+              on_connected: lambda do
+                record_connected
+                registry.touch_session(account_id, token)
+              end,
               on_heartbeat: -> { registry.touch_session(account_id, token) },
+              on_frame: -> { record_frame_received },
               on_reading: lambda do |payload|
                 next unless session_current?
 
@@ -272,10 +294,26 @@ module ::LiveMetrics
       clear_active_connections
     end
 
+    def record_connected
+      @mutex.synchronize do
+        @status = :connected
+        @stalled = false
+      end
+    end
+
+    def record_frame_received
+      now = monotonic_now
+      @mutex.synchronize do
+        @last_frame_monotonic = now
+        @frame_count += 1
+      end
+    end
+
     def record_reading_received
       now = monotonic_now
       @mutex.synchronize do
         @last_event_monotonic = now
+        @reading_count += 1
         @stalled = false
       end
     end

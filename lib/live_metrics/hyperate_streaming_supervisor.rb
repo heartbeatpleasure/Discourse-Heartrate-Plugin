@@ -194,12 +194,16 @@ module ::LiveMetrics
     def publish_health(database)
       sessions = session_keys_for(database).filter_map { |key| @sessions[key] }
       event_ages = sessions.filter_map(&:last_event_age_seconds)
+      frame_ages = sessions.filter_map(&:last_frame_age_seconds)
       registry.publish_health(
         sessions: sessions.count,
         connected: sessions.count(&:connected?),
         reconnecting: sessions.count(&:reconnecting?),
         stalled: sessions.count(&:stalled?),
         oldest_event_age_seconds: event_ages.max,
+        oldest_frame_age_seconds: frame_ages.max,
+        frames: sessions.sum(&:frame_count),
+        readings: sessions.sum(&:reading_count),
         reconnects: sessions.sum(&:reconnect_count),
         stalls: sessions.sum(&:stall_count),
         limit: max_streams,

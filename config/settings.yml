@@ -160,7 +160,7 @@ plugins:
     client: false
 
   live_metrics_hyperate_stream_stall_timeout_seconds:
-    default: 25
+    default: 45
     type: integer
     min: 10
     max: 120
