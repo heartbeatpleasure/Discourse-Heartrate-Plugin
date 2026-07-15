@@ -53,6 +53,7 @@ after_initialize do
 
   require_dependency File.expand_path("app/models/live_metrics/provider_account.rb", __dir__)
   require_relative "lib/live_metrics/current_state_store"
+  require_relative "lib/live_metrics/user_lifecycle_cleanup"
   require_relative "lib/live_metrics/admin_event_log"
   require_relative "lib/live_metrics/hyperate_streaming_registry"
   require_relative "lib/live_metrics/refresh_coordinator"
@@ -78,6 +79,22 @@ after_initialize do
   require_dependency File.expand_path("app/controllers/live_metrics/admin_logs_controller.rb", __dir__)
 
   ::LiveMetrics::Permissions.enforce_visibility_options!
+
+  # Purge credentials, current state, refresh/stream ownership and audience
+  # references while the user and provider account rows are still available.
+  # The after-commit event below repeats the idempotent cleanup as a safety net.
+  add_model_callback(::User, :before_destroy) do
+    ::LiveMetrics::UserLifecycleCleanup.purge_user!(id, reason: "user_destroyed")
+  end
+
+  on(:user_destroyed) do |user|
+    ::LiveMetrics::UserLifecycleCleanup.purge_user!(user, reason: "user_destroyed_confirmed")
+  end
+
+  on(:user_anonymized) do |args|
+    user = args.is_a?(Hash) ? args[:user] : nil
+    ::LiveMetrics::UserLifecycleCleanup.purge_user!(user, reason: "user_anonymized") if user.present?
+  end
 
   on(:site_setting_changed) do |name, _old_value, _new_value|
     setting_name = name.to_sym
