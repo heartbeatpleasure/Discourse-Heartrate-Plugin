@@ -20,9 +20,7 @@ module ::LiveMetrics
 
       supervisor.run
     rescue => e
-      Rails.logger.error(
-        "[live_metrics] HypeRate streaming demon stopped unexpectedly error=#{e.class}: #{e.message}",
-      )
+      ::LiveMetrics::SafeLog.error("hyperate_stream_demon_stopped", error: e)
       raise
     end
   end

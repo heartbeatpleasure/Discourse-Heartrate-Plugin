@@ -200,8 +200,10 @@ module ::LiveMetrics
             record_retry_reason(:authorization_failed)
             write_error_state("unauthorized")
             sync_last_error(snapshot, "unauthorized")
-            Rails.logger.warn(
-              "[live_metrics] HypeRate streaming authorization failed account_id=#{account_id} error=#{e.class}: #{e.message}",
+            ::LiveMetrics::SafeLog.warn(
+              "hyperate_stream_authorization_failed",
+              error: e,
+              account_id: account_id,
             )
             sleep_interruptibly(UNAUTHORIZED_RETRY_SECONDS)
           rescue ::LiveMetrics::HypeRateClient::StreamStalled => e
@@ -209,8 +211,10 @@ module ::LiveMetrics
             record_reconnect(reason: :transport_stalled, stalled: true)
             write_error_state("no_data")
             reconnect_attempt += 1
-            Rails.logger.warn(
-              "[live_metrics] HypeRate streaming watchdog reconnect account_id=#{account_id} error=#{e.class}: #{e.message}",
+            ::LiveMetrics::SafeLog.warn(
+              "hyperate_stream_watchdog_reconnect",
+              error: e,
+              account_id: account_id,
             )
             sleep_interruptibly(reconnect_delay(reconnect_attempt))
           rescue ::LiveMetrics::HypeRateClient::NoHeartRateData => e
@@ -218,8 +222,10 @@ module ::LiveMetrics
             record_reconnect(reason: :no_data)
             write_error_state("no_data")
             reconnect_attempt += 1
-            Rails.logger.warn(
-              "[live_metrics] HypeRate streaming connection ended account_id=#{account_id} error=#{e.class}: #{e.message}",
+            ::LiveMetrics::SafeLog.warn(
+              "hyperate_stream_connection_ended",
+              error: e,
+              account_id: account_id,
             )
             sleep_interruptibly(reconnect_delay(reconnect_attempt))
           rescue IOError, EOFError, SystemCallError, OpenSSL::SSL::SSLError, Timeout::Error => e
@@ -229,8 +235,10 @@ module ::LiveMetrics
             record_reconnect(reason: :transport_error)
             write_error_state("unavailable")
             reconnect_attempt += 1
-            Rails.logger.warn(
-              "[live_metrics] HypeRate streaming transport failed account_id=#{account_id} error=#{e.class}: #{e.message}",
+            ::LiveMetrics::SafeLog.warn(
+              "hyperate_stream_transport_failed",
+              error: e,
+              account_id: account_id,
             )
             sleep_interruptibly(reconnect_delay(reconnect_attempt))
           rescue => e
@@ -312,8 +320,10 @@ module ::LiveMetrics
           .update_all(last_error: desired_error)
       @known_last_error = desired_error if updated == 1
     rescue => e
-      Rails.logger.warn(
-        "[live_metrics] HypeRate streaming error-state sync failed account_id=#{account_id} error=#{e.class}: #{e.message}",
+      ::LiveMetrics::SafeLog.warn(
+        "hyperate_stream_error_state_sync_failed",
+        error: e,
+        account_id: account_id,
       )
     ensure
       clear_active_connections
@@ -469,8 +479,11 @@ module ::LiveMetrics
     end
 
     def log_failure(operation, error)
-      Rails.logger.warn(
-        "[live_metrics] HypeRate streaming session #{operation} failed account_id=#{account_id} error=#{error.class}: #{error.message}",
+      ::LiveMetrics::SafeLog.warn(
+        "hyperate_stream_session_failed",
+        error: error,
+        account_id: account_id,
+        operation: operation,
       )
     end
   end

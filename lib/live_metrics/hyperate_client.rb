@@ -2,6 +2,7 @@
 
 require "base64"
 require "cgi"
+require "digest/sha1"
 require "json"
 require "openssl"
 require "securerandom"
@@ -27,6 +28,8 @@ module ::LiveMetrics
     DEFAULT_STREAM_STALL_TIMEOUT_SECONDS = 45
     JOIN_TIMEOUT_SECONDS = 10
     MAX_MESSAGE_BYTES = 1_048_576
+    MAX_HTTP_HEADER_BYTES = 32_768
+    WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
     MIN_STREAM_STALL_TIMEOUT_SECONDS = 10
     MAX_STREAM_STALL_TIMEOUT_SECONDS = 120
 
@@ -95,7 +98,14 @@ module ::LiveMetrics
     end
 
     def self.configured?
-      SiteSetting.live_metrics_hyperate_enabled && SiteSetting.live_metrics_hyperate_api_key.to_s.strip.present?
+      SiteSetting.live_metrics_hyperate_enabled &&
+        SiteSetting.live_metrics_hyperate_api_key.to_s.strip.present? &&
+        ::LiveMetrics::ProviderTransport.valid_hyperate_wss_url?(
+          SiteSetting.live_metrics_hyperate_ws_url,
+        )
+    rescue => e
+      ::LiveMetrics::SafeLog.warn("hyperate_configuration_check_failed", error: e)
+      false
     end
 
     def self.enabled?
@@ -130,7 +140,7 @@ module ::LiveMetrics
         clear_last_error(account) if persist_last_error
         { status: "no_data", heart_rate: nil, measured_at: nil, measured_at_ms: nil, error: e.message }
       rescue => e
-        Rails.logger.warn("[live_metrics] HypeRate latest failed account_id=#{account.id} error=#{e.class}: #{e.message}")
+        ::LiveMetrics::SafeLog.warn("hyperate_latest_failed", error: e, account_id: account.id)
         { status: "unavailable", heart_rate: nil, measured_at: nil, measured_at_ms: nil, error: "HypeRate data is temporarily unavailable." }
       end
     end
@@ -179,8 +189,10 @@ module ::LiveMetrics
         rescue Unauthorized, Error => e
           last_error = e
           if fallback_allowed_for?(e)
-            Rails.logger.warn(
-              "[live_metrics] HypeRate streaming candidate failed endpoint=#{candidate[:name]} status=#{e.respond_to?(:status) ? e.status : nil} error=#{e.class}: #{e.message}",
+            ::LiveMetrics::SafeLog.warn(
+              "hyperate_stream_candidate_failed",
+              error: e,
+              endpoint: candidate[:name],
             )
             next
           end
@@ -345,7 +357,11 @@ module ::LiveMetrics
           return read_latest_heart_rate_from_uri(device_id, candidate)
         rescue Unauthorized, Error => e
           last_error = e
-          Rails.logger.warn("[live_metrics] HypeRate WebSocket candidate failed endpoint=#{candidate[:name]} status=#{e.respond_to?(:status) ? e.status : nil} error=#{e.class}: #{e.message}")
+          ::LiveMetrics::SafeLog.warn(
+            "hyperate_websocket_candidate_failed",
+            error: e,
+            endpoint: candidate[:name],
+          )
           next if fallback_allowed_for?(e)
           raise
         rescue NoHeartRateData => e
@@ -423,17 +439,15 @@ module ::LiveMetrics
     end
 
     def self.open_socket(uri)
-      tcp = Socket.tcp(uri.host, uri.port || 443, connect_timeout: connect_timeout_seconds)
+      uri = ::LiveMetrics::ProviderTransport.hyperate_wss_uri!(uri.to_s)
+      tcp = Socket.tcp(uri.host, uri.port, connect_timeout: connect_timeout_seconds)
 
-      socket = tcp
-      if uri.scheme == "wss"
-        context = OpenSSL::SSL::SSLContext.new
-        context.set_params
-        socket = OpenSSL::SSL::SSLSocket.new(tcp, context)
-        socket.hostname = uri.host if socket.respond_to?(:hostname=)
-        socket.sync_close = true
-        socket.connect
-      end
+      context = OpenSSL::SSL::SSLContext.new
+      context.set_params(verify_mode: OpenSSL::SSL::VERIFY_PEER)
+      socket = OpenSSL::SSL::SSLSocket.new(tcp, context)
+      socket.hostname = uri.host if socket.respond_to?(:hostname=)
+      socket.sync_close = true
+      socket.connect
 
       key = Base64.strict_encode64(SecureRandom.random_bytes(16))
       path = uri.path.presence || "/"
@@ -459,6 +473,7 @@ module ::LiveMetrics
       raise Unauthorized.new("HypeRate authorization failed", status: status, body: safe_body(response)) if [401, 403].include?(status)
       raise Error.new("HypeRate WebSocket handshake failed", status: status, body: safe_body(response)) unless status == 101
 
+      verify_websocket_handshake!(response, key)
       remaining_bytes.present? ? BufferedSocket.new(socket, remaining_bytes) : socket
     rescue
       begin
@@ -484,7 +499,7 @@ module ::LiveMetrics
       bases
         .compact
         .map(&:strip)
-        .select { |base| base.start_with?("wss://", "ws://") }
+        .select { |base| ::LiveMetrics::ProviderTransport.valid_hyperate_wss_url?(base) }
         .uniq
         .map { |base| { name: endpoint_name(base), uri: websocket_uri_for_base(base, device_id) } }
     end
@@ -557,13 +572,42 @@ module ::LiveMetrics
         chunk = read_available(socket, deadline)
         break if chunk.blank?
         buffer << chunk
+        if buffer.bytesize > MAX_HTTP_HEADER_BYTES
+          raise Error.new("HypeRate WebSocket response headers exceeded the safe size limit.")
+        end
       end
 
       header_end = buffer.index("\r\n\r\n")
-      return [buffer, +"".b] if header_end.blank?
+      raise Error.new("HypeRate WebSocket response headers were incomplete.") if header_end.blank?
 
       header_length = header_end + 4
       [buffer.byteslice(0, header_length), buffer.byteslice(header_length..-1).to_s.b]
+    end
+
+    def self.verify_websocket_handshake!(response, key)
+      headers = websocket_response_headers(response)
+      expected_accept = Base64.strict_encode64(Digest::SHA1.digest("#{key}#{WEBSOCKET_GUID}"))
+      actual_accept = headers["sec-websocket-accept"].to_s
+      upgrade = headers["upgrade"].to_s.downcase
+      connection_tokens = headers["connection"].to_s.downcase.split(",").map(&:strip)
+
+      unless upgrade == "websocket" && connection_tokens.include?("upgrade")
+        raise Error.new("HypeRate WebSocket upgrade headers were invalid.")
+      end
+
+      unless actual_accept.bytesize == expected_accept.bytesize &&
+          ActiveSupport::SecurityUtils.secure_compare(actual_accept, expected_accept)
+        raise Error.new("HypeRate WebSocket accept header was invalid.")
+      end
+    end
+
+    def self.websocket_response_headers(response)
+      response.to_s.split("\r\n").drop(1).each_with_object({}) do |line, headers|
+        name, value = line.split(":", 2)
+        next if name.blank? || value.blank?
+
+        headers[name.downcase] = value.strip
+      end
     end
 
     def self.read_message(socket, deadline, on_frame: nil)

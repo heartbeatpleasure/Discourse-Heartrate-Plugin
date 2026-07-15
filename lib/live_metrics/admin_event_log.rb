@@ -78,9 +78,7 @@ module ::LiveMetrics
         prune!
         true
       rescue => e
-        Rails.logger.warn(
-          "[live_metrics] admin event log write failed error=#{e.class}: #{e.message}",
-        )
+        ::LiveMetrics::SafeLog.warn("admin_event_log_write_failed", error: e)
         false
       end
 
@@ -97,9 +95,7 @@ module ::LiveMetrics
           .select { |entry| severity.blank? || entry[:severity] == severity }
           .first(limit)
       rescue => e
-        Rails.logger.warn(
-          "[live_metrics] admin event log read failed error=#{e.class}: #{e.message}",
-        )
+        ::LiveMetrics::SafeLog.warn("admin_event_log_read_failed", error: e)
         []
       end
 

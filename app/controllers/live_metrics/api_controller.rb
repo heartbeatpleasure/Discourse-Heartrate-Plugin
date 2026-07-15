@@ -5,6 +5,19 @@ module ::LiveMetrics
     USER_CARD_BATCH_LIMIT = 50
     USER_SEARCH_LIMIT = 10
     LIVE_PAYLOAD_UNSET = Object.new.freeze
+    RATE_LIMIT_ACTIONS = {
+      "user_search" => :user_search,
+      "connect_hyperate" => :provider_connect,
+      "disconnect_hyperate" => :provider_disconnect,
+      "add_audience_user" => :audience_mutation,
+      "remove_audience_user" => :audience_mutation,
+      "update_me" => :settings_mutation,
+      "update_account" => :settings_mutation,
+      "activate_account" => :settings_mutation,
+      "directory" => :directory,
+      "badge_status" => :badge_status,
+      "user_cards" => :user_cards,
+    }.freeze
 
     requires_plugin ::LiveMetrics::PLUGIN_NAME
 
@@ -13,6 +26,7 @@ module ::LiveMetrics
     before_action :ensure_enabled
     before_action :ensure_logged_in, only: %i[me live_preview update_me update_account activate_account connect_hyperate disconnect_hyperate user_search add_audience_user remove_audience_user]
     before_action :ensure_logged_in, only: %i[plugin_config directory badge_status], if: -> { SiteSetting.live_metrics_require_login_to_view_page }
+    before_action :enforce_request_rate_limit, only: RATE_LIMIT_ACTIONS.keys.map(&:to_sym)
     before_action :ensure_can_view, only: %i[plugin_config me live_preview directory badge_status user_cards user]
     before_action :ensure_can_share, only: %i[update_me update_account activate_account connect_hyperate user_search add_audience_user remove_audience_user]
 
@@ -186,7 +200,7 @@ module ::LiveMetrics
     rescue ActiveRecord::RecordInvalid => e
       live_metrics_render_error("activate_failed", status: 422, message: e.record.errors.full_messages.join(", ").presence || "The active provider could not be changed.")
     rescue => e
-      Rails.logger.warn("[live_metrics] activate provider failed user_id=#{current_user&.id} provider=#{params[:provider]} error=#{e.class}: #{e.message}")
+      ::LiveMetrics::SafeLog.warn("activate_provider_failed", error: e, user_id: current_user&.id, provider: normalize_provider(params[:provider]) || "unknown")
       live_metrics_render_error("activate_failed", status: 422, message: "The active provider could not be changed.")
     end
 
@@ -222,7 +236,7 @@ module ::LiveMetrics
         return live_metrics_render_error(
           "hyperate_not_configured",
           status: 422,
-          message: "HypeRate is enabled, but the API key is not configured yet.",
+          message: "HypeRate is enabled, but its API key or secure WebSocket URL is not configured correctly.",
         )
       end
 
@@ -436,6 +450,15 @@ module ::LiveMetrics
 
     private
 
+    def enforce_request_rate_limit
+      limiter_action = RATE_LIMIT_ACTIONS.fetch(action_name)
+      ::LiveMetrics::RequestRateLimiter.perform!(
+        limiter_action,
+        user: current_user,
+        request: request,
+      )
+    end
+
     def live_metrics_render_json(payload = nil, status: 200, **keyword_payload)
       payload = keyword_payload if payload.nil?
       payload = {} if payload.nil?
@@ -507,7 +530,7 @@ module ::LiveMetrics
 
       ::LiveMetrics::ProviderAccount.find_by(user_id: current_user.id, provider: provider)
     rescue ActiveRecord::StatementInvalid => e
-      Rails.logger.warn("[live_metrics] provider account lookup failed user_id=#{current_user&.id} provider=#{provider} error=#{e.class}: #{e.message}")
+      ::LiveMetrics::SafeLog.warn("provider_account_lookup_failed", error: e, user_id: current_user&.id, provider: provider || "unknown")
       nil
     end
 
@@ -519,7 +542,7 @@ module ::LiveMetrics
         .order(active: :desc, updated_at: :desc, provider: :asc)
         .to_a
     rescue ActiveRecord::StatementInvalid => e
-      Rails.logger.warn("[live_metrics] provider account lookup failed user_id=#{current_user&.id} error=#{e.class}: #{e.message}")
+      ::LiveMetrics::SafeLog.warn("provider_accounts_lookup_failed", error: e, user_id: current_user&.id)
       []
     end
 
@@ -527,7 +550,7 @@ module ::LiveMetrics
       ::LiveMetrics::ProviderAccount.table_exists? &&
         %w[active show_on_user_card].all? { |column| ::LiveMetrics::ProviderAccount.column_names.include?(column) }
     rescue => e
-      Rails.logger.warn("[live_metrics] provider account table check failed error=#{e.class}: #{e.message}")
+      ::LiveMetrics::SafeLog.warn("provider_account_table_check_failed", error: e)
       false
     end
 
@@ -568,7 +591,7 @@ module ::LiveMetrics
       activated = accounts.max_by(&:updated_at)&.activate!
       ::LiveMetrics::RefreshCoordinator.sync_user(user.id) if activated.present?
     rescue => e
-      Rails.logger.warn("[live_metrics] active provider check failed user_id=#{user&.id} error=#{e.class}: #{e.message}")
+      ::LiveMetrics::SafeLog.warn("active_provider_check_failed", error: e, user_id: user&.id)
     end
 
     def activate_fallback_account_for_user!(user)
@@ -580,7 +603,7 @@ module ::LiveMetrics
         .detect(&:connected?)
       fallback&.activate!
     rescue => e
-      Rails.logger.warn("[live_metrics] fallback provider activation failed user_id=#{user&.id} error=#{e.class}: #{e.message}")
+      ::LiveMetrics::SafeLog.warn("fallback_provider_activation_failed", error: e, user_id: user&.id)
     end
 
     def account_payload(
@@ -601,7 +624,7 @@ module ::LiveMetrics
         display_name: account.display_name.presence || default_display_name(account.provider),
         connected: account.connected?,
         active: account.active?,
-        visibility: account.visibility,
+        visibility: ::LiveMetrics::Permissions.effective_visibility_id(account),
         show_on_profile: account.show_on_profile,
         show_on_user_card: account.show_on_user_card,
         show_in_directory: account.show_in_directory,
@@ -740,7 +763,7 @@ module ::LiveMetrics
         { key: key, label: PROFILE_DETAIL_LABELS[key] || field.name.to_s, value: value }
       end
     rescue => e
-      Rails.logger.warn("[live_metrics] public profile detail lookup failed user_id=#{user&.id} error=#{e.class}: #{e.message}")
+      ::LiveMetrics::SafeLog.warn("public_profile_detail_lookup_failed", error: e, user_id: user&.id)
       []
     end
 
@@ -757,7 +780,7 @@ module ::LiveMetrics
         end.sort_by { |key, _| PROFILE_DETAIL_LABELS.keys.index(key) || 99 }.to_h
       end
     rescue => e
-      Rails.logger.warn("[live_metrics] profile detail user field lookup failed error=#{e.class}: #{e.message}")
+      ::LiveMetrics::SafeLog.warn("profile_detail_field_lookup_failed", error: e)
       {}
     end
 
@@ -837,7 +860,7 @@ module ::LiveMetrics
     rescue ActiveRecord::RecordInvalid => e
       live_metrics_render_error("settings_save_failed", status: 422, message: e.record.errors.full_messages.join(", ").presence || "Your heartrate settings could not be saved.")
     rescue => e
-      Rails.logger.warn("[live_metrics] account settings save failed account_id=#{account&.id} error=#{e.class}: #{e.message}")
+      ::LiveMetrics::SafeLog.warn("account_settings_save_failed", error: e, account_id: account&.id)
       live_metrics_render_error("settings_save_failed", status: 422, message: "Your heartrate settings could not be saved.")
     end
 

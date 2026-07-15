@@ -97,6 +97,7 @@ plugins:
   live_metrics_pulsoid_client_secret:
     default: ""
     type: string
+    secret: true
     client: false
 
   live_metrics_pulsoid_authorize_url:
@@ -141,6 +142,7 @@ plugins:
   live_metrics_hyperate_api_key:
     default: ""
     type: string
+    secret: true
     client: false
 
   live_metrics_hyperate_ws_url:

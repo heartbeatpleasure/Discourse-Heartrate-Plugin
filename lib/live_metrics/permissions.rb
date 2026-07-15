@@ -35,10 +35,41 @@ module ::LiveMetrics
         .select { |value| ::LiveMetrics::ProviderAccount::VISIBILITIES.include?(value) }
         .uniq
 
-      configured.presence || ::LiveMetrics::ProviderAccount::VISIBILITIES
+      # Only me is the fail-closed baseline and cannot be removed by an invalid or
+      # overly restrictive site-setting value.
+      (["private"] + configured).uniq
     rescue => e
-      Rails.logger.warn("[live_metrics] visibility option setting check failed error=#{e.class}: #{e.message}")
-      ::LiveMetrics::ProviderAccount::VISIBILITIES
+      ::LiveMetrics::SafeLog.warn("visibility_option_setting_failed", error: e)
+      ["private"]
+    end
+
+    def visibility_enabled?(visibility)
+      visibility_option_ids.include?(visibility.to_s)
+    end
+
+    def effective_visibility_id(account_or_visibility)
+      visibility =
+        if account_or_visibility.respond_to?(:visibility)
+          account_or_visibility.visibility.to_s
+        else
+          account_or_visibility.to_s
+        end
+
+      visibility_enabled?(visibility) ? visibility : "private"
+    end
+
+    def enforce_visibility_options!
+      return 0 unless defined?(::LiveMetrics::ProviderAccount)
+      return 0 unless ::LiveMetrics::ProviderAccount.table_exists?
+
+      allowed = visibility_option_ids
+      now = Time.zone.now
+      ::LiveMetrics::ProviderAccount
+        .where.not(visibility: allowed)
+        .update_all(visibility: "private", updated_at: now)
+    rescue => e
+      ::LiveMetrics::SafeLog.warn("visibility_enforcement_failed", error: e)
+      0
     end
 
     # New provider connections should be immediately useful while still respecting
@@ -126,7 +157,7 @@ module ::LiveMetrics
       # Owners who are no longer allowed to share must not remain publicly visible.
       return false unless can_share_user?(account.user)
 
-      case account.visibility.to_s
+      case effective_visibility_id(account)
       when "public"
         viewer.present? || anonymous_can_view?
       when "specific_users"
@@ -139,9 +170,11 @@ module ::LiveMetrics
         false
       end
     rescue => e
-      Rails.logger.warn(
-        "[live_metrics] account visibility check failed account_id=#{account&.id} " \
-        "viewer_id=#{viewer&.id} error=#{e.class}: #{e.message}",
+      ::LiveMetrics::SafeLog.warn(
+        "account_visibility_check_failed",
+        error: e,
+        account_id: account&.id,
+        viewer_id: viewer&.id,
       )
       false
     end

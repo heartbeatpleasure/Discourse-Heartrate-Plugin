@@ -231,9 +231,11 @@ module ::LiveMetrics
       end
 
       def log_failure(operation, account_id, error)
-        suffix = account_id.present? ? " account_id=#{account_id}" : ""
-        Rails.logger.warn(
-          "[live_metrics] HypeRate streaming registry #{operation} failed#{suffix} error=#{error.class}: #{error.message}",
+        ::LiveMetrics::SafeLog.warn(
+          "hyperate_stream_registry_failed",
+          error: error,
+          operation: operation,
+          account_id: account_id,
         )
       end
     end

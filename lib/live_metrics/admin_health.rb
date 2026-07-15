@@ -55,9 +55,7 @@ module ::LiveMetrics
           stale_threshold_seconds: integer_setting(:live_metrics_stale_threshold_seconds),
         }
       rescue => e
-        Rails.logger.warn(
-          "[live_metrics] admin health configuration failed error=#{e.class}: #{e.message}",
-        )
+        ::LiveMetrics::SafeLog.warn("admin_health_configuration_failed", error: e)
         {
           plugin_enabled: false,
           async_current_readings_enabled: false,
@@ -90,9 +88,7 @@ module ::LiveMetrics
           active_pulsoid: pulsoid,
         }
       rescue => e
-        Rails.logger.warn(
-          "[live_metrics] admin health account counts failed error=#{e.class}: #{e.message}",
-        )
+        ::LiveMetrics::SafeLog.warn("admin_health_account_counts_failed", error: e)
         unavailable_account_counts
       end
 
@@ -141,9 +137,7 @@ module ::LiveMetrics
           last_successful_join_at: time_from_ms(raw["last_successful_join_at_ms"]),
         }
       rescue => e
-        Rails.logger.warn(
-          "[live_metrics] admin health collector parse failed error=#{e.class}: #{e.message}",
-        )
+        ::LiveMetrics::SafeLog.warn("admin_health_collector_parse_failed", error: e)
         empty_collector_payload(configuration)
       end
 

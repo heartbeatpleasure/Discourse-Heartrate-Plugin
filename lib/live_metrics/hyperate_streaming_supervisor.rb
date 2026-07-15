@@ -29,8 +29,9 @@ module ::LiveMetrics
 
           with_database(database) { reconcile_database(database) }
         rescue => e
-          Rails.logger.warn(
-            "[live_metrics] HypeRate streaming reconcile failed database=#{database} error=#{e.class}: #{e.message}",
+          ::LiveMetrics::SafeLog.warn(
+            "hyperate_stream_reconcile_failed",
+            error: e,
           )
           stop_database_sessions(database, clear_state: false)
         ensure
@@ -140,8 +141,10 @@ module ::LiveMetrics
         ::LiveMetrics::CurrentStateStore.delete(account_id)
       end
     rescue => e
-      Rails.logger.warn(
-        "[live_metrics] HypeRate streaming session start failed account_id=#{account_id} error=#{e.class}: #{e.message}",
+      ::LiveMetrics::SafeLog.warn(
+        "hyperate_stream_session_start_failed",
+        error: e,
+        account_id: account_id,
       )
     end
 
@@ -154,8 +157,10 @@ module ::LiveMetrics
       registry.release_session(session.account_id, session.token)
       ::LiveMetrics::CurrentStateStore.delete(session.account_id) if clear_state
     rescue => e
-      Rails.logger.warn(
-        "[live_metrics] HypeRate streaming session stop failed account_id=#{session&.account_id} error=#{e.class}: #{e.message}",
+      ::LiveMetrics::SafeLog.warn(
+        "hyperate_stream_session_stop_failed",
+        error: e,
+        account_id: session&.account_id,
       )
     end
 

@@ -36,12 +36,17 @@ after_initialize do
       :state,
       :api_key,
       :device_id,
+      :error_description,
+      :provider_response,
     ]
   rescue
     # Keep plugin boot resilient if Rails filter configuration is unavailable.
   end
 
   require_relative "lib/live_metrics/token_cipher"
+  require_relative "lib/live_metrics/safe_log"
+  require_relative "lib/live_metrics/provider_transport"
+  require_relative "lib/live_metrics/request_rate_limiter"
   require_relative "lib/live_metrics/permissions"
   require_relative "lib/live_metrics/pulsoid_client"
   require_relative "lib/live_metrics/hyperate_client"
@@ -69,7 +74,14 @@ after_initialize do
   require_dependency File.expand_path("app/controllers/live_metrics/admin_health_controller.rb", __dir__)
   require_dependency File.expand_path("app/controllers/live_metrics/admin_logs_controller.rb", __dir__)
 
+  ::LiveMetrics::Permissions.enforce_visibility_options!
+
   on(:site_setting_changed) do |name, _old_value, _new_value|
+    setting_name = name.to_sym
+    if setting_name == :live_metrics_allowed_visibility_options
+      ::LiveMetrics::Permissions.enforce_visibility_options!
+    end
+
     next unless %i[
       live_metrics_enabled
       live_metrics_async_current_readings_enabled
@@ -80,7 +92,7 @@ after_initialize do
       live_metrics_hyperate_stream_stall_timeout_seconds
       live_metrics_hyperate_api_key
       live_metrics_hyperate_ws_url
-    ].include?(name)
+    ].include?(setting_name)
 
     ::LiveMetrics::RefreshCoordinator.sync_all
   end

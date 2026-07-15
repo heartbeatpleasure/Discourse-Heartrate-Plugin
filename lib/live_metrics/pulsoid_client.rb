@@ -1,14 +1,16 @@
 # frozen_string_literal: true
 
-require "net/http"
-require "uri"
 require "json"
+require "net/http"
+require "openssl"
+require "uri"
 
 module ::LiveMetrics
   class PulsoidClient
     DEFAULT_SCOPES = %w[data:heart_rate:read]
     STATISTICS_SCOPE = "data:statistics:read"
-    USER_AGENT = "Discourse Heartrate Pulsoid PoC/0.1"
+    USER_AGENT = "Discourse Heartrate Pulsoid/0.1"
+    MAX_RESPONSE_BYTES = 1_048_576
 
     class Error < StandardError
       attr_reader :status, :body
@@ -25,9 +27,22 @@ module ::LiveMetrics
     class StaleCredentials < Error; end
 
     def self.configured?
-      SiteSetting.live_metrics_pulsoid_enabled &&
-        SiteSetting.live_metrics_pulsoid_client_id.to_s.present? &&
-        SiteSetting.live_metrics_pulsoid_client_secret.to_s.present?
+      return false unless SiteSetting.live_metrics_pulsoid_enabled
+      return false if SiteSetting.live_metrics_pulsoid_client_id.to_s.blank?
+      return false if SiteSetting.live_metrics_pulsoid_client_secret.to_s.blank?
+
+      provider_urls = [
+        SiteSetting.live_metrics_pulsoid_authorize_url,
+        SiteSetting.live_metrics_pulsoid_token_url,
+        SiteSetting.live_metrics_pulsoid_revoke_url,
+        SiteSetting.live_metrics_pulsoid_latest_url,
+        SiteSetting.live_metrics_pulsoid_profile_url,
+      ]
+      provider_urls << SiteSetting.live_metrics_pulsoid_statistics_url if SiteSetting.live_metrics_statistics_enabled
+      provider_urls.all? { |url| ::LiveMetrics::ProviderTransport.valid_pulsoid_https_url?(url) }
+    rescue => e
+      ::LiveMetrics::SafeLog.warn("pulsoid_configuration_check_failed", error: e)
+      false
     end
 
     def self.scopes
@@ -44,7 +59,7 @@ module ::LiveMetrics
     end
 
     def self.authorization_url(state:)
-      uri = URI.parse(SiteSetting.live_metrics_pulsoid_authorize_url)
+      uri = ::LiveMetrics::ProviderTransport.pulsoid_https_uri!(SiteSetting.live_metrics_pulsoid_authorize_url)
       uri.query = URI.encode_www_form(
         response_type: "code",
         client_id: SiteSetting.live_metrics_pulsoid_client_id,
@@ -97,7 +112,7 @@ module ::LiveMetrics
       post_form(SiteSetting.live_metrics_pulsoid_revoke_url, token: token)
       true
     rescue => e
-      Rails.logger.warn("[live_metrics] Pulsoid revoke failed user_id=#{account.user_id} error=#{e.class}: #{e.message}")
+      ::LiveMetrics::SafeLog.warn("pulsoid_revoke_failed", error: e, user_id: account.user_id)
       false
     end
 
@@ -117,7 +132,7 @@ module ::LiveMetrics
       persist_unauthorized(account) if persist_last_error
       { status: "unauthorized", heart_rate: nil, measured_at: nil, measured_at_ms: nil, error: e.message }
     rescue => e
-      Rails.logger.warn("[live_metrics] Pulsoid latest failed account_id=#{account.id} error=#{e.class}: #{e.message}")
+      ::LiveMetrics::SafeLog.warn("pulsoid_latest_failed", error: e, account_id: account.id)
       { status: "unavailable", heart_rate: nil, measured_at: nil, measured_at_ms: nil, error: "Pulsoid data is temporarily unavailable." }
     end
 
@@ -139,7 +154,7 @@ module ::LiveMetrics
         end
       end
     rescue => e
-      Rails.logger.warn("[live_metrics] Pulsoid statistics failed account_id=#{account.id} range=#{safe_range} error=#{e.class}: #{e.message}")
+      ::LiveMetrics::SafeLog.warn("pulsoid_statistics_failed", error: e, account_id: account.id, range: safe_range)
       nil
     end
 
@@ -148,7 +163,7 @@ module ::LiveMetrics
         get_json(SiteSetting.live_metrics_pulsoid_profile_url, token: token)
       end
     rescue => e
-      Rails.logger.warn("[live_metrics] Pulsoid profile failed account_id=#{account.id} error=#{e.class}: #{e.message}")
+      ::LiveMetrics::SafeLog.warn("pulsoid_profile_failed", error: e, account_id: account.id)
       nil
     end
 
@@ -288,7 +303,7 @@ module ::LiveMetrics
     end
 
     def self.get_json(url, token:, query: nil)
-      uri = URI.parse(url)
+      uri = ::LiveMetrics::ProviderTransport.pulsoid_https_uri!(url)
       uri.query = URI.encode_www_form(query) if query.present?
       request = Net::HTTP::Get.new(uri)
       request["Accept"] = "application/json"
@@ -304,7 +319,7 @@ module ::LiveMetrics
     end
 
     def self.post_form(url, params)
-      uri = URI.parse(url)
+      uri = ::LiveMetrics::ProviderTransport.pulsoid_https_uri!(url)
       request = Net::HTTP::Post.new(uri)
       request["Content-Type"] = "application/x-www-form-urlencoded"
       request["Accept"] = "application/json"
@@ -315,9 +330,20 @@ module ::LiveMetrics
     end
 
     def self.perform(uri, request)
-      Net::HTTP.start(uri.hostname, uri.port, use_ssl: uri.scheme == "https", open_timeout: 8, read_timeout: 10) do |http|
-        http.request(request)
-      end
+      uri = ::LiveMetrics::ProviderTransport.pulsoid_https_uri!(uri.to_s)
+      http = Net::HTTP.new(uri.hostname, uri.port)
+      http.use_ssl = true
+      http.verify_mode = OpenSSL::SSL::VERIFY_PEER
+      http.open_timeout = 8
+      http.read_timeout = 10
+      response = http.start { |client| client.request(request) }
+      ensure_response_size!(response)
+      response
+    end
+
+    def self.ensure_response_size!(response)
+      size = response.body.to_s.bytesize
+      raise Error.new("Pulsoid response exceeded the safe size limit") if size > MAX_RESPONSE_BYTES
     end
 
     def self.parse_json(body)

@@ -2,12 +2,28 @@
 
 module ::LiveMetrics
   class AuthController < ::ApplicationController
+    RATE_LIMIT_ACTIONS = {
+      "pulsoid_start" => :provider_connect,
+      "pulsoid_disconnect" => :provider_disconnect,
+    }.freeze
+
+    OAUTH_ERROR_CODES = %w[
+      access_denied
+      invalid_request
+      unauthorized_client
+      unsupported_response_type
+      invalid_scope
+      server_error
+      temporarily_unavailable
+    ].freeze
+
     requires_plugin ::LiveMetrics::PLUGIN_NAME
 
     skip_before_action :check_xhr, raise: false
 
     before_action :ensure_enabled
     before_action :ensure_logged_in
+    before_action :enforce_request_rate_limit, only: RATE_LIMIT_ACTIONS.keys.map(&:to_sym)
     before_action :ensure_can_share, only: %i[pulsoid_start pulsoid_callback]
 
     def pulsoid_start
@@ -34,7 +50,11 @@ module ::LiveMetrics
         result: "connect_failed",
         severity: "error",
       )
-      Rails.logger.warn("[live_metrics] Pulsoid OAuth start failed user_id=#{current_user&.id} error=#{e.class}: #{e.message}")
+      ::LiveMetrics::SafeLog.warn(
+        "pulsoid_oauth_start_failed",
+        error: e,
+        user_id: current_user&.id,
+      )
       redirect_to live_metrics_page_url(error: "pulsoid_connect_failed")
     end
 
@@ -53,8 +73,13 @@ module ::LiveMetrics
           result: "provider_error",
           severity: "warning",
         )
-        Rails.logger.warn("[live_metrics] Pulsoid OAuth returned error user_id=#{current_user&.id} error=#{params[:error]} description=#{params[:error_description]}")
-        return redirect_to live_metrics_page_url(error: safe_oauth_error(params[:error].to_s))
+        error_code = safe_oauth_error(params[:error])
+        ::LiveMetrics::SafeLog.warn(
+          "pulsoid_oauth_provider_error",
+          user_id: current_user&.id,
+          oauth_error: error_code,
+        )
+        return redirect_to live_metrics_page_url(error: error_code)
       end
 
       if expected_state.blank? || received_state.blank? || expected_state.bytesize != received_state.bytesize || !ActiveSupport::SecurityUtils.secure_compare(expected_state, received_state)
@@ -124,7 +149,11 @@ module ::LiveMetrics
         result: "connect_failed",
         severity: "error",
       )
-      Rails.logger.warn("[live_metrics] Pulsoid OAuth callback failed user_id=#{current_user&.id} error=#{e.class}: #{e.message}")
+      ::LiveMetrics::SafeLog.warn(
+        "pulsoid_oauth_callback_failed",
+        error: e,
+        user_id: current_user&.id,
+      )
       redirect_to live_metrics_page_url(error: "pulsoid_connect_failed")
     end
 
@@ -165,6 +194,15 @@ module ::LiveMetrics
 
     private
 
+    def enforce_request_rate_limit
+      limiter_action = RATE_LIMIT_ACTIONS.fetch(action_name)
+      ::LiveMetrics::RequestRateLimiter.perform!(
+        limiter_action,
+        user: current_user,
+        request: request,
+      )
+    end
+
     def ensure_enabled
       raise Discourse::NotFound unless SiteSetting.live_metrics_enabled && SiteSetting.live_metrics_pulsoid_enabled
     end
@@ -191,8 +229,8 @@ module ::LiveMetrics
     end
 
     def safe_oauth_error(value)
-      sanitized = value.to_s.downcase.gsub(/[^a-z0-9_\-]/, "_")
-      sanitized.present? ? sanitized.truncate(80, omission: "") : "oauth_error"
+      normalized = value.to_s.downcase.strip
+      OAUTH_ERROR_CODES.include?(normalized) ? normalized : "oauth_error"
     end
 
     def live_metrics_page_url(query = {})
@@ -209,14 +247,18 @@ module ::LiveMetrics
         .detect(&:connected?)
       fallback&.activate!
     rescue => e
-      Rails.logger.warn("[live_metrics] fallback provider activation failed user_id=#{current_user&.id} error=#{e.class}: #{e.message}")
+      ::LiveMetrics::SafeLog.warn(
+        "fallback_provider_activation_failed",
+        error: e,
+        user_id: current_user&.id,
+      )
     end
 
     def provider_accounts_table_ready?
       ::LiveMetrics::ProviderAccount.table_exists? &&
         %w[active show_on_user_card].all? { |column| ::LiveMetrics::ProviderAccount.column_names.include?(column) }
     rescue => e
-      Rails.logger.warn("[live_metrics] provider account table check failed error=#{e.class}: #{e.message}")
+      ::LiveMetrics::SafeLog.warn("provider_account_table_check_failed", error: e)
       false
     end
   end

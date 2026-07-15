@@ -254,6 +254,38 @@ RSpec.describe LiveMetrics::HypeRateClient do
     expect(candidates.last[:uri].path).to eq("/socket/websocket")
   end
 
+
+  it "accepts only a cryptographically valid WebSocket upgrade response" do
+    key = Base64.strict_encode64("0123456789abcdef")
+    accept = Base64.strict_encode64(
+      Digest::SHA1.digest("#{key}#{described_class::WEBSOCKET_GUID}"),
+    )
+    response = <<~HTTP.gsub("\n", "\r\n")
+      HTTP/1.1 101 Switching Protocols
+      Upgrade: websocket
+      Connection: keep-alive, Upgrade
+      Sec-WebSocket-Accept: #{accept}
+
+    HTTP
+
+    expect { described_class.verify_websocket_handshake!(response, key) }.not_to raise_error
+
+    invalid_response = response.sub(accept, Base64.strict_encode64("invalid"))
+    expect do
+      described_class.verify_websocket_handshake!(invalid_response, key)
+    end.to raise_error(LiveMetrics::HypeRateClient::Error, /accept header/)
+  end
+
+  it "rejects oversized WebSocket response headers" do
+    socket = stub
+    described_class.stubs(:connect_timeout_seconds).returns(10)
+    described_class.stubs(:read_available).returns("A" * (described_class::MAX_HTTP_HEADER_BYTES + 1))
+
+    expect do
+      described_class.read_http_response(socket)
+    end.to raise_error(LiveMetrics::HypeRateClient::Error, /safe size limit/)
+  end
+
   it "preserves WebSocket bytes received with the HTTP upgrade response" do
     socket = stub
     response = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n".b

@@ -69,4 +69,25 @@ RSpec.describe LiveMetrics::PulsoidClient do
     expect(account.reload.last_error).to be_nil
   end
 
+  it "refuses insecure or off-domain provider endpoint configuration" do
+    SiteSetting.live_metrics_pulsoid_enabled = true
+    SiteSetting.live_metrics_pulsoid_client_id = "client-id"
+    SiteSetting.live_metrics_pulsoid_client_secret = "client-secret"
+    SiteSetting.live_metrics_pulsoid_authorize_url = "http://pulsoid.net/oauth2/authorize"
+
+    expect(described_class.configured?).to eq(false)
+
+    SiteSetting.live_metrics_pulsoid_authorize_url =
+      "https://pulsoid.net.evil.test/oauth2/authorize"
+    expect(described_class.configured?).to eq(false)
+  end
+
+  it "rejects provider responses that exceed the safe size limit" do
+    response = stub(body: "x" * (described_class::MAX_RESPONSE_BYTES + 1))
+
+    expect do
+      described_class.ensure_response_size!(response)
+    end.to raise_error(LiveMetrics::PulsoidClient::Error, /safe size limit/)
+  end
+
 end

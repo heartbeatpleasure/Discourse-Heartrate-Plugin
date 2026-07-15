@@ -117,4 +117,22 @@ RSpec.describe "LiveMetrics Pulsoid OAuth", type: :request do
       severity: "warning",
     )
   end
+  it "maps arbitrary provider errors to a bounded code without logging descriptions" do
+    LiveMetrics::SafeLog.expects(:warn).with(
+      "pulsoid_oauth_provider_error",
+      user_id: user.id,
+      oauth_error: "oauth_error",
+    )
+
+    get "/live-metrics/auth/pulsoid/callback",
+        params: {
+          error: "unexpected provider value",
+          error_description: "access_token=must-never-be-logged",
+        }
+
+    expect(response.status).to eq(302)
+    expect(response.location).to include("error=oauth_error")
+    expect(response.location).not_to include("must-never-be-logged")
+  end
+
 end

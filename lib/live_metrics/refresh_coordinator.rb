@@ -144,8 +144,10 @@ module ::LiveMetrics
           sync_account(account)
         end
       rescue => e
-        Rails.logger.warn(
-          "[live_metrics] refresh coordinator user sync failed user_id=#{user_id} error=#{e.class}: #{e.message}",
+        ::LiveMetrics::SafeLog.warn(
+          "refresh_coordinator_user_sync_failed",
+          error: e,
+          user_id: user_id,
         )
       end
 
@@ -156,9 +158,7 @@ module ::LiveMetrics
           sync_account(account)
         end
       rescue => e
-        Rails.logger.warn(
-          "[live_metrics] refresh coordinator recovery failed error=#{e.class}: #{e.message}",
-        )
+        ::LiveMetrics::SafeLog.warn("refresh_coordinator_recovery_failed", error: e)
       end
 
       def generation_current?(account_or_id, generation)
@@ -328,9 +328,11 @@ module ::LiveMetrics
       end
 
       def log_failure(operation, account_id, error)
-        suffix = account_id.present? ? " account_id=#{account_id}" : ""
-        Rails.logger.warn(
-          "[live_metrics] refresh coordinator #{operation} failed#{suffix} error=#{error.class}: #{error.message}",
+        ::LiveMetrics::SafeLog.warn(
+          "refresh_coordinator_failed",
+          error: error,
+          operation: operation,
+          account_id: account_id,
         )
       end
     end

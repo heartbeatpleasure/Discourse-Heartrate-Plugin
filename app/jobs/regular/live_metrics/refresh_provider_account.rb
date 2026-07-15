@@ -66,8 +66,11 @@ module Jobs
               severity: "error",
             )
           end
-          Rails.logger.warn(
-            "[live_metrics] provider refresh failed account_id=#{account_id} provider=#{account.provider} error=#{e.class}: #{e.message}",
+          ::LiveMetrics::SafeLog.warn(
+            "provider_refresh_failed",
+            error: e,
+            account_id: account_id,
+            provider: account&.provider || "unknown",
           )
 
           if generation_still_valid?(account, generation)
@@ -182,8 +185,11 @@ module Jobs
           end
         end
       rescue => e
-        Rails.logger.warn(
-          "[live_metrics] provider error-state sync failed account_id=#{account&.id} provider=#{account&.provider} error=#{e.class}: #{e.message}",
+        ::LiveMetrics::SafeLog.warn(
+          "provider_error_state_sync_failed",
+          error: e,
+          account_id: account&.id,
+          provider: account&.provider || "unknown",
         )
       end
 

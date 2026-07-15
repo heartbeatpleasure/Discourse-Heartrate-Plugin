@@ -32,6 +32,10 @@ module ::LiveMetrics
       now = Time.zone.now
 
       transaction do
+        # Serialize provider switches for this user before touching account rows.
+        # The matching partial unique index remains the final database guarantee.
+        ::User.where(id: account.user_id).lock.pick(:id)
+
         where(user_id: account.user_id).where.not(id: account.id).update_all(active: false, updated_at: now)
 
         if account.persisted?

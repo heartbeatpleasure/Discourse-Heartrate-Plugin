@@ -283,9 +283,11 @@ module ::LiveMetrics
       end
 
       def log_failure(operation, account_id, error)
-        suffix = account_id.present? ? " account_id=#{account_id}" : ""
-        Rails.logger.warn(
-          "[live_metrics] current state #{operation} failed#{suffix} error=#{error.class}: #{error.message}",
+        ::LiveMetrics::SafeLog.warn(
+          "current_state_failed",
+          error: error,
+          operation: operation,
+          account_id: account_id,
         )
       end
     end
