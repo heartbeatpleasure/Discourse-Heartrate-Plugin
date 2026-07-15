@@ -56,6 +56,12 @@ RSpec.describe "LiveMetrics API", type: :request do
     response.parsed_body.fetch("readings", []).filter_map { |row| row["username"] }
   end
 
+  def status_count
+    get "/live-metrics/api/status"
+    expect(response.status).to eq(200)
+    response.parsed_body.fetch("count")
+  end
+
   it "reads live preview data from Redis without calling a provider" do
     now_ms = (Time.zone.now.to_f * 1000).to_i
     LiveMetrics::CurrentStateStore.write(
@@ -138,6 +144,7 @@ RSpec.describe "LiveMetrics API", type: :request do
 
     expect(directory_usernames).not_to include(user.username)
     expect(user_card_usernames).not_to include(user.username_lower)
+    expect(status_count).to eq(0)
   end
 
   it "shows private readings to the owner and staff" do
@@ -151,10 +158,12 @@ RSpec.describe "LiveMetrics API", type: :request do
     sign_in(user)
     expect(directory_usernames).to include(user.username)
     expect(user_card_usernames).to include(user.username_lower)
+    expect(status_count).to eq(1)
 
     sign_in(admin)
     expect(directory_usernames).to include(user.username)
     expect(user_card_usernames).to include(user.username_lower)
+    expect(status_count).to eq(1)
   end
 
   it "only shows specific-user readings to selected members and staff" do
@@ -169,14 +178,17 @@ RSpec.describe "LiveMetrics API", type: :request do
     sign_in(viewer)
     expect(directory_usernames).to include(user.username)
     expect(user_card_usernames).to include(user.username_lower)
+    expect(status_count).to eq(1)
 
     sign_in(other_viewer)
     expect(directory_usernames).not_to include(user.username)
     expect(user_card_usernames).not_to include(user.username_lower)
+    expect(status_count).to eq(0)
 
     sign_in(admin)
     expect(directory_usernames).to include(user.username)
     expect(user_card_usernames).to include(user.username_lower)
+    expect(status_count).to eq(1)
   end
 
   it "excludes blocked members but never blocks staff" do
@@ -191,14 +203,44 @@ RSpec.describe "LiveMetrics API", type: :request do
     sign_in(viewer)
     expect(directory_usernames).not_to include(user.username)
     expect(user_card_usernames).not_to include(user.username_lower)
+    expect(status_count).to eq(0)
 
     sign_in(other_viewer)
     expect(directory_usernames).to include(user.username)
     expect(user_card_usernames).to include(user.username_lower)
+    expect(status_count).to eq(1)
 
     sign_in(admin)
     expect(directory_usernames).to include(user.username)
     expect(user_card_usernames).to include(user.username_lower)
+    expect(status_count).to eq(1)
+  end
+
+  it "never calls providers while calculating the personalized badge count" do
+    account.update!(visibility: "logged_in", show_in_directory: true)
+    write_live_reading
+    SiteSetting.live_metrics_async_current_readings_enabled = false
+    sign_in(viewer)
+
+    LiveMetrics::HypeRateClient.expects(:latest).never
+    LiveMetrics::HypeRateClient.expects(:fetch_latest).never
+    LiveMetrics::PulsoidClient.expects(:latest).never
+    LiveMetrics::PulsoidClient.expects(:fetch_latest).never
+
+    expect(status_count).to eq(1)
+  end
+
+  it "returns zero badge count when the overview is disabled" do
+    account.update!(visibility: "logged_in", show_in_directory: true)
+    write_live_reading
+    SiteSetting.live_metrics_directory_enabled = false
+
+    get "/live-metrics/api/status"
+
+    expect(response.status).to eq(200)
+    expect(response.parsed_body["live"]).to eq(false)
+    expect(response.parsed_body["count"]).to eq(0)
+    expect(response.parsed_body["directory_enabled"]).to eq(false)
   end
 
   it "does not return staff in blocked-user search and refuses direct blocked-list writes" do

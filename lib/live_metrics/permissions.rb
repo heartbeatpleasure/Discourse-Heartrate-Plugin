@@ -44,7 +44,16 @@ module ::LiveMetrics
     def user_in_any_group?(user, groups)
       return false if user.nil? || groups.blank?
 
-      user.groups.where("lower(name) IN (?)", groups).exists?
+      normalized_groups = groups.map { |group| group.to_s.downcase }
+      association = user.association(:groups)
+
+      if association.loaded?
+        return association.target.any? do |group|
+          normalized_groups.include?(group.name.to_s.downcase)
+        end
+      end
+
+      user.groups.where("lower(name) IN (?)", normalized_groups).exists?
     end
 
     def can_view?(guardian_or_user)

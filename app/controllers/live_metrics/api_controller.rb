@@ -12,8 +12,8 @@ module ::LiveMetrics
 
     before_action :ensure_enabled
     before_action :ensure_logged_in, only: %i[me live_preview update_me update_account activate_account connect_hyperate disconnect_hyperate user_search add_audience_user remove_audience_user]
-    before_action :ensure_logged_in, only: %i[plugin_config directory], if: -> { SiteSetting.live_metrics_require_login_to_view_page }
-    before_action :ensure_can_view, only: %i[plugin_config me live_preview directory user_cards user]
+    before_action :ensure_logged_in, only: %i[plugin_config directory badge_status], if: -> { SiteSetting.live_metrics_require_login_to_view_page }
+    before_action :ensure_can_view, only: %i[plugin_config me live_preview directory badge_status user_cards user]
     before_action :ensure_can_share, only: %i[update_me update_account activate_account connect_hyperate user_search add_audience_user remove_audience_user]
 
     # NOTE: do not name this action `config`; ActionController already has
@@ -317,6 +317,33 @@ module ::LiveMetrics
       raise
     end
 
+    # Lightweight personalized count for navigation badges. It deliberately
+    # reuses the exact directory selection path so the badge always represents
+    # the members this viewer would see on the Heartrate overview.
+    def badge_status
+      database_ready = provider_accounts_table_ready?
+      directory_enabled = SiteSetting.live_metrics_directory_enabled
+
+      unless directory_enabled && database_ready
+        return live_metrics_render_json(
+          live: false,
+          count: 0,
+          generated_at: Time.zone.now.iso8601,
+          directory_enabled: directory_enabled,
+          database_ready: database_ready,
+        )
+      end
+
+      count = visible_live_directory_entries(current_state_only: true).length
+      live_metrics_render_json(
+        live: count.positive?,
+        count: count,
+        generated_at: Time.zone.now.iso8601,
+        directory_enabled: true,
+        database_ready: true,
+      )
+    end
+
     def directory
       raise Discourse::NotFound unless SiteSetting.live_metrics_directory_enabled
 
@@ -324,22 +351,7 @@ module ::LiveMetrics
         return live_metrics_render_json(users: [], generated_at: Time.zone.now.iso8601, database_ready: false)
       end
 
-      accounts = ::LiveMetrics::ProviderAccount
-        .enabled_providers
-        .active
-        .directory_enabled
-        .includes(:user)
-        .order(updated_at: :desc)
-        .limit(SiteSetting.live_metrics_directory_limit.to_i)
-        .to_a
-
-      visible_accounts = accounts.select { |account| can_view_account?(account, surface: :directory) }
-      live_by_account_id = live_payloads_for(visible_accounts)
-
-      rows = visible_accounts.filter_map do |account|
-        live = live_by_account_id[account.id]
-        next unless directory_live_payload?(live)
-
+      rows = visible_live_directory_entries.map do |account, live|
         account_payload(
           account,
           include_user: true,
@@ -827,6 +839,42 @@ module ::LiveMetrics
     rescue => e
       Rails.logger.warn("[live_metrics] account settings save failed account_id=#{account&.id} error=#{e.class}: #{e.message}")
       live_metrics_render_error("settings_save_failed", status: 422, message: "Your heartrate settings could not be saved.")
+    end
+
+    def visible_live_directory_entries(current_state_only: false)
+      accounts = ::LiveMetrics::ProviderAccount
+        .enabled_providers
+        .active
+        .directory_enabled
+        .includes(user: :groups)
+        .order(updated_at: :desc)
+        .limit(SiteSetting.live_metrics_directory_limit.to_i)
+        .to_a
+
+      visible_accounts = accounts.select { |account| can_view_account?(account, surface: :directory) }
+      live_by_account_id =
+        if current_state_only
+          current_state_live_payloads_for(visible_accounts)
+        else
+          live_payloads_for(visible_accounts)
+        end
+
+      visible_accounts.filter_map do |account|
+        live = live_by_account_id[account.id]
+        next unless directory_live_payload?(live)
+
+        [account, live]
+      end
+    end
+
+    def current_state_live_payloads_for(accounts)
+      accounts = Array(accounts).compact.uniq { |account| account.id }
+      return {} if accounts.blank?
+
+      states = ::LiveMetrics::CurrentStateStore.read_many(accounts)
+      accounts.each_with_object({}) do |account, result|
+        result[account.id] = decorate_async_live_payload(account, states[account.id])
+      end
     end
 
     def can_view_account?(account, surface:)
