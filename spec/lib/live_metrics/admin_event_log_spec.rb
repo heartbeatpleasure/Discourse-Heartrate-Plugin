@@ -33,6 +33,40 @@ RSpec.describe LiveMetrics::AdminEventLog do
     )
   end
 
+  it "counts only matching events inside a bounded time window" do
+    described_class.record(
+      provider: "hyperate",
+      event: "stream_reconnect",
+      result: "transport_error",
+      severity: "warning",
+      occurred_at: 10.minutes.ago,
+    )
+    described_class.record(
+      provider: "hyperate",
+      event: "stream_reconnect",
+      result: "authorization_failed",
+      severity: "error",
+      occurred_at: 5.minutes.ago,
+    )
+    described_class.record(
+      provider: "hyperate",
+      event: "stream_reconnect",
+      result: "transport_error",
+      severity: "warning",
+      occurred_at: 45.minutes.ago,
+    )
+
+    expect(
+      described_class.count_since(
+        since: 30.minutes.ago,
+        provider: "hyperate",
+        event: "stream_reconnect",
+        severity: %w[warning error],
+        exclude_result: "authorization_failed",
+      ),
+    ).to eq(1)
+  end
+
   it "filters events by provider and severity" do
     described_class.record(
       provider: "pulsoid",

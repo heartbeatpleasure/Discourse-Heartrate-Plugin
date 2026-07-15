@@ -99,6 +99,32 @@ module ::LiveMetrics
         []
       end
 
+      def count_since(
+        since:,
+        provider: nil,
+        event: nil,
+        result: nil,
+        severity: nil,
+        exclude_result: nil
+      )
+        prune!
+        filters = {
+          provider: normalize_filters(provider, PROVIDERS),
+          event: normalize_filters(event, EVENTS),
+          result: normalize_filters(result, RESULTS),
+          severity: normalize_filters(severity, SEVERITIES),
+          exclude_result: normalize_filters(exclude_result, RESULTS),
+        }
+
+        redis
+          .zrangebyscore(KEY, since.to_time.to_f, "+inf")
+          .filter_map { |entry| parse_entry(entry) }
+          .count { |entry| entry_matches_filters?(entry, filters) }
+      rescue => e
+        ::LiveMetrics::SafeLog.warn("admin_event_log_count_failed", error: e)
+        0
+      end
+
       def total_count
         prune!
         redis.zcard(KEY).to_i
@@ -172,6 +198,23 @@ module ::LiveMetrics
         value = value.to_i
         value = DEFAULT_LIMIT if value <= 0
         value.clamp(1, MAX_LIMIT)
+      end
+
+      def normalize_filters(value, allowed)
+        return nil if value.blank?
+
+        normalized = Array(value).map(&:to_s).select { |entry| allowed.include?(entry) }.uniq
+        normalized.presence || ["__invalid__"]
+      end
+
+      def entry_matches_filters?(entry, filters)
+        return false if filters[:provider].present? && filters[:provider].exclude?(entry[:provider])
+        return false if filters[:event].present? && filters[:event].exclude?(entry[:event])
+        return false if filters[:result].present? && filters[:result].exclude?(entry[:result])
+        return false if filters[:severity].present? && filters[:severity].exclude?(entry[:severity])
+        return false if filters[:exclude_result].present? && filters[:exclude_result].include?(entry[:result])
+
+        true
       end
 
       def sanitize_filter(value, allowed)

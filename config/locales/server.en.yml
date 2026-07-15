@@ -36,3 +36,14 @@ en:
     live_metrics_hyperate_max_streams: "Maximum number of simultaneous HypeRate streaming connections per Discourse site. The default of 100 supports the planned 50 concurrent users while leaving a safety margin. Additional active accounts wait until capacity is available."
     live_metrics_hyperate_stream_stall_timeout_seconds: "Maximum number of seconds a connected HypeRate stream may go without any WebSocket frame or heartbeat response before the transport is treated as stalled and reconnected. Heart-rate silence alone does not trigger a reconnect. The recommended value is 45 seconds."
     live_metrics_hyperate_read_timeout_seconds: "Legacy HypeRate single-read timeout, in seconds. Used only while persistent HypeRate streaming is disabled or for rollback."
+
+  dashboard:
+    problem:
+      live_metrics_operational_health: "Heartrate has persistent operational problems:%{issues}<a href='%{base_path}/admin/plugins/live-metrics-health'>Open Heartrate Health</a> or <a href='%{base_path}/admin/plugins/live-metrics-logs'>review recent Heartrate logs</a>."
+
+  live_metrics:
+    admin_alerts:
+      collector_health_stale: "The HypeRate collector has stopped reporting healthy status for longer than the allowed health window."
+      stream_limit_reached: "The HypeRate stream capacity is full (%{sessions} of %{limit} streams in use)."
+      repeated_authorization_failures: "%{count} provider authorization failures were recorded within %{window_minutes} minutes."
+      repeated_stream_reconnects: "%{count} HypeRate reconnect problems were recorded within %{window_minutes} minutes (alert threshold %{threshold})."

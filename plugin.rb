@@ -60,6 +60,9 @@ after_initialize do
   require_relative "lib/live_metrics/hyperate_streaming_supervisor"
   require_relative "lib/live_metrics/hyperate_streaming_demon"
   require_relative "lib/live_metrics/admin_health"
+  require_relative "lib/live_metrics/operational_alerts"
+  require_relative "app/services/problem_check/live_metrics_operational_health"
+  register_problem_check ProblemCheck::LiveMetricsOperationalHealth
   require_dependency File.expand_path(
     "app/jobs/regular/live_metrics/refresh_provider_account.rb",
     __dir__,
