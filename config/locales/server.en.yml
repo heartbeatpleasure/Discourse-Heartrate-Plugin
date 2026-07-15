@@ -8,7 +8,7 @@ en:
     live_metrics_viewer_groups_title: "Groups allowed to view Heartrate"
     live_metrics_allowed_sharer_groups: "Groups that may connect providers and share their own live heart-rate data. Users also need view access. Leave empty to allow all logged-in users."
     live_metrics_allowed_sharer_groups_title: "Groups allowed to share heartrate data"
-    live_metrics_allowed_visibility_options: "Visibility choices shown to users for their shared heart-rate data. Use private, logged_in, public, and/or staff. Remove options such as public or staff when they should not be selectable."
+    live_metrics_allowed_visibility_options: "Visibility choices shown to users for their shared heart-rate data. Use private, specific_users, logged_in, public, and/or staff. Remove options such as public or staff when they should not be selectable."
     live_metrics_allowed_visibility_options_title: "Visibility choices users may select"
     live_metrics_directory_enabled: "Enable the Heartrate overview/directory."
     live_metrics_directory_limit: "Maximum number of accounts shown in the Heartrate directory."

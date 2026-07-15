@@ -27,7 +27,7 @@ plugins:
     client: false
 
   live_metrics_allowed_visibility_options:
-    default: "private|logged_in|public|staff"
+    default: "private|specific_users|logged_in|public|staff"
     type: list
     client: false
 

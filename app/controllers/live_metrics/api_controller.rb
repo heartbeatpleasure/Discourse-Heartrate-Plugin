@@ -3,6 +3,7 @@
 module ::LiveMetrics
   class ApiController < ::ApplicationController
     USER_CARD_BATCH_LIMIT = 50
+    USER_SEARCH_LIMIT = 10
     LIVE_PAYLOAD_UNSET = Object.new.freeze
 
     requires_plugin ::LiveMetrics::PLUGIN_NAME
@@ -10,10 +11,10 @@ module ::LiveMetrics
     skip_before_action :check_xhr, raise: false
 
     before_action :ensure_enabled
-    before_action :ensure_logged_in, only: %i[me live_preview update_me update_account activate_account connect_hyperate disconnect_hyperate]
+    before_action :ensure_logged_in, only: %i[me live_preview update_me update_account activate_account connect_hyperate disconnect_hyperate user_search add_audience_user remove_audience_user]
     before_action :ensure_logged_in, only: %i[plugin_config directory], if: -> { SiteSetting.live_metrics_require_login_to_view_page }
     before_action :ensure_can_view, only: %i[plugin_config me live_preview directory user_cards user]
-    before_action :ensure_can_share, only: %i[update_me update_account activate_account connect_hyperate]
+    before_action :ensure_can_share, only: %i[update_me update_account activate_account connect_hyperate user_search add_audience_user remove_audience_user]
 
     # NOTE: do not name this action `config`; ActionController already has
     # a `config` method and Discourse plugin controllers can fail hard when
@@ -39,6 +40,71 @@ module ::LiveMetrics
       return live_metrics_render_error("database_not_ready", status: 503, message: database_not_ready_message) unless provider_accounts_table_ready?
 
       ensure_active_account_for_user!(current_user)
+      live_metrics_render_json(current_user_payload(include_live: false, include_statistics: false))
+    end
+
+
+    def user_search
+      query = params[:q].to_s.strip
+      return live_metrics_render_json(users: []) if query.length < 2
+
+      escaped = ActiveRecord::Base.sanitize_sql_like(query.downcase)
+      users = ::User
+        .where(active: true, staged: false)
+        .where.not(id: current_user.id)
+        .where("username_lower LIKE :query OR LOWER(COALESCE(name, '')) LIKE :query", query: "%#{escaped}%")
+        .order(:username_lower)
+        .limit(USER_SEARCH_LIMIT)
+
+      live_metrics_render_json(users: users.map { |user| audience_user_payload(user) })
+    end
+
+    def add_audience_user
+      account = owned_provider_account!
+      return if performed? || account.blank?
+      mode = audience_mode!
+      return if performed? || mode.blank?
+      target = audience_target_user!
+      return if performed? || target.blank?
+
+      account.with_lock do
+        specific_ids = normalized_audience_ids(account.specific_user_ids)
+        blocked_ids = normalized_audience_ids(account.blocked_user_ids)
+        destination = mode == "specific" ? specific_ids : blocked_ids
+        opposite = mode == "specific" ? blocked_ids : specific_ids
+
+        unless destination.include?(target.id)
+          if destination.length >= ::LiveMetrics::ProviderAccount::MAX_AUDIENCE_USERS
+            return live_metrics_render_error("audience_limit_reached", status: 422, message: "You can add up to #{::LiveMetrics::ProviderAccount::MAX_AUDIENCE_USERS} users to each list.")
+          end
+          destination << target.id
+        end
+        opposite.delete(target.id)
+
+        account.specific_user_ids = mode == "specific" ? destination : opposite
+        account.blocked_user_ids = mode == "blocked" ? destination : opposite
+        account.save!
+      end
+
+      live_metrics_render_json(current_user_payload(include_live: false, include_statistics: false))
+    end
+
+    def remove_audience_user
+      account = owned_provider_account!
+      return if performed? || account.blank?
+      mode = audience_mode!
+      return if performed? || mode.blank?
+      target = audience_target_user!
+      return if performed? || target.blank?
+
+      account.with_lock do
+        column = mode == "specific" ? :specific_user_ids : :blocked_user_ids
+        ids = normalized_audience_ids(account.public_send(column))
+        ids.delete(target.id)
+        account.public_send("#{column}=", ids)
+        account.save!
+      end
+
       live_metrics_render_json(current_user_payload(include_live: false, include_statistics: false))
     end
 
@@ -512,6 +578,14 @@ module ::LiveMetrics
         profile: public_profile_payload(account)
       }
 
+      if surface == :self
+        payload[:audience] = {
+          specific_users: audience_users_payload(account.specific_user_ids),
+          blocked_users: audience_users_payload(account.blocked_user_ids),
+          max_users_per_list: ::LiveMetrics::ProviderAccount::MAX_AUDIENCE_USERS,
+        }
+      end
+
       payload[:user] = user_payload(account.user) if include_user
 
       if include_statistics && account.pulsoid? && SiteSetting.live_metrics_statistics_enabled && account.scopes_list.include?(::LiveMetrics::PulsoidClient::STATISTICS_SCOPE)
@@ -756,8 +830,10 @@ module ::LiveMetrics
       case account.visibility
       when "public"
         SiteSetting.live_metrics_allow_anonymous_public_view || current_user.present?
+      when "specific_users"
+        current_user.present? && normalized_audience_ids(account.specific_user_ids).include?(current_user.id)
       when "logged_in"
-        current_user.present?
+        current_user.present? && !normalized_audience_ids(account.blocked_user_ids).include?(current_user.id)
       when "staff"
         current_user&.staff?
       else
@@ -847,8 +923,10 @@ module ::LiveMetrics
       case id.to_s
       when "private"
         "Only me"
+      when "specific_users"
+        "Specific users"
       when "logged_in"
-        "Logged-in users"
+        "All members"
       when "public"
         "Public"
       when "staff"
@@ -856,6 +934,60 @@ module ::LiveMetrics
       else
         id.to_s.titleize
       end
+    end
+
+
+    def owned_provider_account!
+      provider = params[:provider].to_s
+      unless ::LiveMetrics.enabled_provider_names.include?(provider)
+        live_metrics_render_error("provider_disabled", status: 404, message: "That provider is not available.")
+        return nil
+      end
+
+      account = ::LiveMetrics::ProviderAccount.find_by(user_id: current_user.id, provider: provider)
+      if account.blank? || !account.connected?
+        live_metrics_render_error("account_not_found", status: 404, message: "Connect this provider before changing its audience.")
+        return nil
+      end
+      account
+    end
+
+    def audience_mode!
+      mode = params[:mode].to_s
+      return mode if %w[specific blocked].include?(mode)
+
+      live_metrics_render_error("invalid_audience_mode", status: 422, message: "Choose a valid audience list.")
+      nil
+    end
+
+    def audience_target_user!
+      username = params[:username].to_s.strip.downcase
+      user = ::User.find_by(username_lower: username, active: true, staged: false)
+      if user.blank? || user.id == current_user.id
+        live_metrics_render_error("invalid_audience_user", status: 422, message: "Choose another active member.")
+        return nil
+      end
+      user
+    end
+
+    def normalized_audience_ids(value)
+      Array(value).filter_map { |id| Integer(id, exception: false) }.select(&:positive?).uniq
+    end
+
+    def audience_users_payload(ids)
+      normalized = normalized_audience_ids(ids)
+      return [] if normalized.blank?
+
+      users_by_id = ::User.where(id: normalized, active: true, staged: false).index_by(&:id)
+      normalized.filter_map { |id| users_by_id[id] }.map { |user| audience_user_payload(user) }
+    end
+
+    def audience_user_payload(user)
+      {
+        username: user.username,
+        name: user.name,
+        avatar_template: user.avatar_template,
+      }
     end
 
     def boolean_param(key, default:)

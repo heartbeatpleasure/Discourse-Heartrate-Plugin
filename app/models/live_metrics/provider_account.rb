@@ -7,7 +7,8 @@ module ::LiveMetrics
     PROVIDER_PULSOID = "pulsoid"
     PROVIDER_HYPERATE = "hyperate"
     PROVIDERS = [PROVIDER_PULSOID, PROVIDER_HYPERATE]
-    VISIBILITIES = %w[private logged_in public staff]
+    VISIBILITIES = %w[private specific_users logged_in public staff]
+    MAX_AUDIENCE_USERS = 100
 
     belongs_to :user
 
