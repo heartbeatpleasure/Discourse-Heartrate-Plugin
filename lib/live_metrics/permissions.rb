@@ -82,6 +82,48 @@ module ::LiveMetrics
       user_in_any_group?(user, groups)
     end
 
+    # Central visibility policy for every public Heartrate surface. Keeping the
+    # audience decision in one place prevents the overview, profile and user-card
+    # endpoints from drifting apart.
+    def can_view_account?(account, viewer)
+      return false unless enabled?
+      return false if account.blank?
+
+      # The account owner and staff always retain access. This check deliberately
+      # happens before specific-user and blocked-user lists.
+      return true if viewer&.staff?
+      return true if viewer.present? && account.user_id == viewer.id
+
+      # Owners who are no longer allowed to share must not remain publicly visible.
+      return false unless can_share_user?(account.user)
+
+      case account.visibility.to_s
+      when "public"
+        viewer.present? || anonymous_can_view?
+      when "specific_users"
+        viewer.present? && audience_ids(account.specific_user_ids).include?(viewer.id)
+      when "logged_in"
+        viewer.present? && !audience_ids(account.blocked_user_ids).include?(viewer.id)
+      when "staff"
+        false
+      else
+        false
+      end
+    rescue => e
+      Rails.logger.warn(
+        "[live_metrics] account visibility check failed account_id=#{account&.id} " \
+        "viewer_id=#{viewer&.id} error=#{e.class}: #{e.message}",
+      )
+      false
+    end
+
+    def audience_ids(value)
+      Array(value)
+        .filter_map { |id| Integer(id, exception: false) }
+        .select(&:positive?)
+        .uniq
+    end
+
     def anonymous_can_view?
       !SiteSetting.live_metrics_require_login_to_view_page && SiteSetting.live_metrics_allow_anonymous_public_view
     end

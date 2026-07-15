@@ -53,6 +53,13 @@ module ::LiveMetrics
         .where(active: true, staged: false)
         .where.not(id: current_user.id)
         .where("username_lower LIKE :query OR LOWER(COALESCE(name, '')) LIKE :query", query: "%#{escaped}%")
+
+      # Staff always retain access and therefore cannot meaningfully be blocked.
+      # Excluding them here keeps the UI honest, while the write endpoint below
+      # independently enforces the same rule.
+      users = users.where(admin: false, moderator: false) if params[:mode].to_s == "blocked"
+
+      users = users
         .order(:username_lower)
         .limit(USER_SEARCH_LIMIT)
 
@@ -67,9 +74,17 @@ module ::LiveMetrics
       target = audience_target_user!
       return if performed? || target.blank?
 
+      if mode == "blocked" && target.staff?
+        return live_metrics_render_error(
+          "staff_cannot_be_blocked",
+          status: 422,
+          message: "Staff members always retain access and cannot be added to the blocked list.",
+        )
+      end
+
       account.with_lock do
         specific_ids = normalized_audience_ids(account.specific_user_ids)
-        blocked_ids = normalized_audience_ids(account.blocked_user_ids)
+        blocked_ids = normalized_blocked_audience_ids(account.blocked_user_ids)
         destination = mode == "specific" ? specific_ids : blocked_ids
         opposite = mode == "specific" ? blocked_ids : specific_ids
 
@@ -99,7 +114,12 @@ module ::LiveMetrics
 
       account.with_lock do
         column = mode == "specific" ? :specific_user_ids : :blocked_user_ids
-        ids = normalized_audience_ids(account.public_send(column))
+        ids =
+          if mode == "blocked"
+            normalized_blocked_audience_ids(account.public_send(column))
+          else
+            normalized_audience_ids(account.public_send(column))
+          end
         ids.delete(target.id)
         account.public_send("#{column}=", ids)
         account.save!
@@ -581,7 +601,7 @@ module ::LiveMetrics
       if surface == :self
         payload[:audience] = {
           specific_users: audience_users_payload(account.specific_user_ids),
-          blocked_users: audience_users_payload(account.blocked_user_ids),
+          blocked_users: audience_users_payload(account.blocked_user_ids, exclude_staff: true),
           max_users_per_list: ::LiveMetrics::ProviderAccount::MAX_AUDIENCE_USERS,
         }
       end
@@ -823,22 +843,7 @@ module ::LiveMetrics
         return false unless account.show_on_user_card
       end
 
-      return true if current_user&.staff?
-      return true if current_user.present? && account.user_id == current_user.id
-      return false unless ::LiveMetrics::Permissions.can_share_user?(account.user)
-
-      case account.visibility
-      when "public"
-        SiteSetting.live_metrics_allow_anonymous_public_view || current_user.present?
-      when "specific_users"
-        current_user.present? && normalized_audience_ids(account.specific_user_ids).include?(current_user.id)
-      when "logged_in"
-        current_user.present? && !normalized_audience_ids(account.blocked_user_ids).include?(current_user.id)
-      when "staff"
-        current_user&.staff?
-      else
-        false
-      end
+      ::LiveMetrics::Permissions.can_view_account?(account, current_user)
     end
 
     def normalized_usernames_param(key)
@@ -971,14 +976,25 @@ module ::LiveMetrics
     end
 
     def normalized_audience_ids(value)
-      Array(value).filter_map { |id| Integer(id, exception: false) }.select(&:positive?).uniq
+      ::LiveMetrics::Permissions.audience_ids(value)
     end
 
-    def audience_users_payload(ids)
+    def normalized_blocked_audience_ids(value)
+      ids = normalized_audience_ids(value)
+      return ids if ids.blank?
+
+      staff_ids = ::User.where(id: ids).where("admin OR moderator").pluck(:id)
+      ids - staff_ids
+    end
+
+    def audience_users_payload(ids, exclude_staff: false)
       normalized = normalized_audience_ids(ids)
       return [] if normalized.blank?
 
-      users_by_id = ::User.where(id: normalized, active: true, staged: false).index_by(&:id)
+      users = ::User.where(id: normalized, active: true, staged: false)
+      users = users.where(admin: false, moderator: false) if exclude_staff
+      users_by_id = users.index_by(&:id)
+
       normalized.filter_map { |id| users_by_id[id] }.map { |user| audience_user_payload(user) }
     end
 
