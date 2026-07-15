@@ -43,6 +43,11 @@ module ::LiveMetrics
       true
     rescue => e
       registry.release_session(account_id, token)
+      record_stream_event(
+        event: "stream_join",
+        result: "start_failed",
+        severity: "error",
+      )
       log_failure("start", e)
       false
     end
@@ -316,11 +321,18 @@ module ::LiveMetrics
 
     def record_connected
       joined_at_ms = current_time_ms
+      recovered = false
       @mutex.synchronize do
+        recovered = @last_successful_join_at_ms.present?
         @status = :connected
         @stalled = false
         @last_successful_join_at_ms = joined_at_ms
       end
+
+      record_stream_event(
+        event: "stream_join",
+        result: recovered ? "recovered" : "success",
+      )
     end
 
     def record_frame_received
@@ -353,6 +365,12 @@ module ::LiveMetrics
           @stalled = true
         end
       end
+
+      record_stream_event(
+        event: "stream_reconnect",
+        result: normalized_reason,
+        severity: reconnect_severity(normalized_reason),
+      )
     end
 
     def record_retry_reason(reason)
@@ -363,6 +381,33 @@ module ::LiveMetrics
         @last_reconnect_reason = normalized_reason
         @last_reconnect_at_ms = reconnect_at_ms
       end
+
+      record_stream_event(
+        event: "stream_reconnect",
+        result: normalized_reason,
+        severity: reconnect_severity(normalized_reason),
+      )
+    end
+
+    def reconnect_severity(reason)
+      case reason.to_s
+      when "authorization_failed", "transport_stalled", "unexpected_error"
+        "error"
+      when "stream_ended", "no_data", "transport_error"
+        "warning"
+      else
+        "info"
+      end
+    end
+
+    def record_stream_event(event:, result:, severity: "info")
+      ::LiveMetrics::AdminEventLog.record(
+        provider: "hyperate",
+        event: event,
+        result: result,
+        severity: severity,
+        client_context: "server",
+      )
     end
 
     def monotonic_now

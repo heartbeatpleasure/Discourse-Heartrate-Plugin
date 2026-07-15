@@ -11,7 +11,7 @@ en:
         description: "Admin tools for the Heartrate plugin."
         open_settings: "Open settings"
         overview_title: "Admin tools"
-        overview_description: "Choose a Heartrate admin area. Settings and operational health are kept together for easier administration."
+        overview_description: "Choose a Heartrate admin area. Settings, operational health, and recent provider events are kept together for easier administration."
         settings_description: "Configure access, visibility, providers, refresh intervals, realtime streaming, and retention thresholds."
         open_tool: "Open tool"
         category_configuration: "Configuration"
@@ -44,7 +44,6 @@ en:
           configuration_description: "Read-only values that determine how the current Heartrate acquisition paths operate. Secrets and endpoint URLs are intentionally omitted."
           privacy_title: "Privacy and retention"
           privacy_description: "Confirmation of the limited data model used for live readings and admin diagnostics."
-          privacy_note: "This admin endpoint does not return heart-rate values, usernames, device IDs, account IDs, tokens, API keys, or other provider credentials."
 
           overall:
             healthy:
@@ -175,3 +174,85 @@ en:
             active_accounts_without_sessions:
               title: "Active HypeRate accounts have no sessions"
               description: "%{count} active HypeRate account(s) exist, but the collector currently reports zero managed sessions."
+
+        logs:
+          title: "Heartrate logs"
+          short_title: "Logs"
+          description: "Review recent privacy-safe Pulsoid, HypeRate, and collector events without provider credentials or reading values."
+          back_to_overview: "Back to overview"
+          refresh: "Refresh"
+          refreshing: "Refreshing…"
+          loading: "Loading Heartrate logs…"
+          load_error: "Heartrate logs could not be loaded. Check the browser console and Rails logs."
+          last_checked: "Last checked: %{time}"
+          not_available: "Not available"
+          recent_title: "Recent operational events"
+          recent_description: "Only bounded event codes and a broad client context are retained. Repeated readings, frames, usernames, account identifiers, and credentials are never recorded here."
+          provider_filter: "Provider"
+          severity_filter: "Severity"
+          all_providers: "All providers"
+          all_severities: "All severities"
+          no_events: "No events match the current filters."
+          retention: "Retention: up to %{days} days and %{max} events"
+          total: "%{count} event(s) currently retained"
+
+          columns:
+            time: "Time"
+            severity: "Severity"
+            provider: "Provider"
+            event: "Event"
+            result: "Result"
+            client: "Client context"
+
+          providers:
+            pulsoid: "Pulsoid"
+            hyperate: "HypeRate"
+            system: "System"
+
+          severities:
+            info: "Info"
+            warning: "Warning"
+            error: "Error"
+
+          events:
+            oauth_start: "OAuth start"
+            oauth_callback: "OAuth callback"
+            provider_connect: "Provider connect"
+            provider_disconnect: "Provider disconnect"
+            provider_refresh: "Provider refresh"
+            stream_join: "Stream join"
+            stream_reconnect: "Stream reconnect"
+            stream_capacity: "Stream capacity"
+            unknown: "Unknown event"
+
+          results:
+            redirected: "Redirected to provider"
+            success: "Successful"
+            disconnected: "Disconnected"
+            recovered: "Recovered"
+            sharing_denied: "Sharing not allowed"
+            not_configured: "Provider not configured"
+            state_mismatch: "OAuth state mismatch"
+            provider_error: "Provider returned an OAuth error"
+            missing_authorization_code: "Authorization code missing"
+            database_not_ready: "Database not ready"
+            connect_failed: "Connect failed"
+            disconnect_failed: "Disconnect failed"
+            invalid_device_id: "Invalid device ID"
+            disabled: "Provider disabled"
+            authorization_failed: "Authorization failed"
+            transport_stalled: "Transport stalled"
+            no_data: "No provider data"
+            transport_error: "Transport error"
+            unexpected_error: "Unexpected error"
+            stream_ended: "Stream ended"
+            start_failed: "Stream start failed"
+            limit_reached: "Stream limit reached"
+            unknown: "Unknown result"
+
+          client_contexts:
+            desktop_browser: "Desktop browser"
+            mobile_browser: "Mobile browser"
+            embedded_webview: "Embedded webview"
+            server: "Server process"
+            unknown: "Unknown"

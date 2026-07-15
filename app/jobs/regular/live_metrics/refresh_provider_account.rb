@@ -54,10 +54,18 @@ module Jobs
           if generation_still_valid?(account, generation)
             persist_provider_state(account, provider_state, generation)
             sync_account_error_state(account, provider_state, generation)
+            record_refresh_outcome(account, provider_state, attempt)
             next_delay, next_attempt = next_schedule(account, provider_state, duration, attempt)
           end
         rescue => e
           duration = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
+          if attempt.zero?
+            record_admin_event(
+              account&.provider,
+              result: "unexpected_error",
+              severity: "error",
+            )
+          end
           Rails.logger.warn(
             "[live_metrics] provider refresh failed account_id=#{account_id} provider=#{account.provider} error=#{e.class}: #{e.message}",
           )
@@ -164,10 +172,46 @@ module Jobs
         if updated == 1
           account.last_error = desired_error
           account.updated_at = attributes[:updated_at] if attributes[:updated_at].present?
+
+          if desired_error == "unauthorized"
+            record_admin_event(
+              account.provider,
+              result: "authorization_failed",
+              severity: "error",
+            )
+          end
         end
       rescue => e
         Rails.logger.warn(
           "[live_metrics] provider error-state sync failed account_id=#{account&.id} provider=#{account&.provider} error=#{e.class}: #{e.message}",
+        )
+      end
+
+
+      def record_refresh_outcome(account, provider_state, attempt)
+        status = provider_state&.with_indifferent_access&.dig(:status).to_s
+
+        if status == "unavailable" && attempt.to_i.zero?
+          record_admin_event(
+            account&.provider,
+            result: "transport_error",
+            severity: "warning",
+          )
+        elsif attempt.to_i.positive? && %w[live delayed stale].include?(status)
+          record_admin_event(account&.provider, result: "recovered")
+        end
+      end
+
+      def record_admin_event(provider, result:, severity: "info")
+        provider = provider.to_s
+        provider = "system" unless %w[pulsoid hyperate].include?(provider)
+
+        ::LiveMetrics::AdminEventLog.record(
+          provider: provider,
+          event: "provider_refresh",
+          result: result,
+          severity: severity,
+          client_context: "server",
         )
       end
 

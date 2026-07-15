@@ -230,6 +230,23 @@ export default RouteTemplate(
             {{i18n "admin.live_metrics.open_tool"}}
           </span>
         </a>
+
+        <a class="lm-landing__card" href="/admin/plugins/live-metrics-logs">
+          <div class="lm-landing__card-header">
+            <div class="lm-landing__card-title">
+              <span class="lm-landing__card-badge">
+                {{i18n "admin.live_metrics.category_monitoring"}}
+              </span>
+              <h3>{{i18n "admin.live_metrics.logs.short_title"}}</h3>
+            </div>
+          </div>
+          <p class="lm-landing__card-description">
+            {{i18n "admin.live_metrics.logs.description"}}
+          </p>
+          <span class="lm-landing__card-action">
+            {{i18n "admin.live_metrics.open_tool"}}
+          </span>
+        </a>
       </section>
     </div>
   </template>

@@ -15,6 +15,7 @@ module ::LiveMetrics
       @sessions = {}
       @leader_tokens = {}
       @overflow_logged = {}
+      @limit_event_logged = {}
       @limit_reached = {}
       @last_reconnect_events = {}
       @last_successful_joins = {}
@@ -99,9 +100,11 @@ module ::LiveMetrics
           .pluck(:id, :provider_uid)
 
       overflow = rows.length > limit
-      @limit_reached[current_database] = rows.length >= limit
+      limit_reached = rows.length >= limit
+      @limit_reached[current_database] = limit_reached
       rows = rows.first(limit)
       log_overflow_once(overflow, limit)
+      log_limit_reached_once(limit_reached, limit)
 
       settings_fingerprint = Digest::SHA256.hexdigest(
         [
@@ -260,6 +263,7 @@ module ::LiveMetrics
     def clear_database_health_metadata(database)
       database_key = database.to_s
       @limit_reached.delete(database_key)
+      @limit_event_logged.delete(database_key)
       @last_reconnect_events.delete(database_key)
       @last_successful_joins.delete(database_key)
     end
@@ -295,6 +299,25 @@ module ::LiveMetrics
       else
         @overflow_logged.delete(database)
       end
+    end
+
+    def log_limit_reached_once(limit_reached, limit)
+      database = current_database
+      unless limit_reached
+        @limit_event_logged.delete(database)
+        return
+      end
+
+      return if @limit_event_logged[database] == limit
+
+      @limit_event_logged[database] = limit
+      ::LiveMetrics::AdminEventLog.record(
+        provider: "system",
+        event: "stream_capacity",
+        result: "limit_reached",
+        severity: "warning",
+        client_context: "server",
+      )
     end
 
     def session_keys_for(database)

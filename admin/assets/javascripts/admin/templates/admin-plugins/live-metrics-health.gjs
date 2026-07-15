@@ -345,6 +345,9 @@ export default RouteTemplate(
                 (i18n "admin.live_metrics.health.refresh")
               }}
             </button>
+            <a class="btn" href="/admin/plugins/live-metrics-logs">
+              {{i18n "admin.live_metrics.logs.short_title"}}
+            </a>
             <a
               class="btn"
               href="/admin/site_settings/category/all_results?filter=live_metrics"
@@ -490,10 +493,6 @@ export default RouteTemplate(
                 <div class="lm-health__row-detail">{{row.detail}}</div>
               </article>
             {{/each}}
-          </div>
-
-          <div class="lm-health__privacy-note">
-            {{i18n "admin.live_metrics.health.privacy_note"}}
           </div>
         </section>
       {{/if}}

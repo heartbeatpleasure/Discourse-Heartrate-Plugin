@@ -12,6 +12,11 @@ module ::LiveMetrics
 
     def pulsoid_start
       unless ::LiveMetrics::PulsoidClient.configured?
+        record_admin_event(
+          event: "oauth_start",
+          result: "not_configured",
+          severity: "warning",
+        )
         return redirect_to live_metrics_page_url(error: "pulsoid_not_configured")
       end
 
@@ -20,8 +25,15 @@ module ::LiveMetrics
 
       # OAuth must leave the Discourse host. On newer Rails/Discourse builds,
       # external redirects require allow_other_host to avoid a hard error page.
-      redirect_to ::LiveMetrics::PulsoidClient.authorization_url(state: state), allow_other_host: true
+      authorization_url = ::LiveMetrics::PulsoidClient.authorization_url(state: state)
+      redirect_to authorization_url, allow_other_host: true
+      record_admin_event(event: "oauth_start", result: "redirected")
     rescue => e
+      record_admin_event(
+        event: "oauth_start",
+        result: "connect_failed",
+        severity: "error",
+      )
       Rails.logger.warn("[live_metrics] Pulsoid OAuth start failed user_id=#{current_user&.id} error=#{e.class}: #{e.message}")
       redirect_to live_metrics_page_url(error: "pulsoid_connect_failed")
     end
@@ -36,19 +48,39 @@ module ::LiveMetrics
       # problem as a generic state mismatch. Successful callbacks still require
       # an exact state match before exchanging the authorization code.
       if params[:error].present?
+        record_admin_event(
+          event: "oauth_callback",
+          result: "provider_error",
+          severity: "warning",
+        )
         Rails.logger.warn("[live_metrics] Pulsoid OAuth returned error user_id=#{current_user&.id} error=#{params[:error]} description=#{params[:error_description]}")
         return redirect_to live_metrics_page_url(error: safe_oauth_error(params[:error].to_s))
       end
 
       if expected_state.blank? || received_state.blank? || expected_state.bytesize != received_state.bytesize || !ActiveSupport::SecurityUtils.secure_compare(expected_state, received_state)
+        record_admin_event(
+          event: "oauth_callback",
+          result: "state_mismatch",
+          severity: "warning",
+        )
         return redirect_to live_metrics_page_url(error: "oauth_state_mismatch")
       end
 
       if code.blank?
+        record_admin_event(
+          event: "oauth_callback",
+          result: "missing_authorization_code",
+          severity: "warning",
+        )
         return redirect_to live_metrics_page_url(error: "missing_authorization_code")
       end
 
       unless provider_accounts_table_ready?
+        record_admin_event(
+          event: "oauth_callback",
+          result: "database_not_ready",
+          severity: "error",
+        )
         return redirect_to live_metrics_page_url(error: "database_not_ready")
       end
 
@@ -84,14 +116,25 @@ module ::LiveMetrics
       end
       ::LiveMetrics::RefreshCoordinator.sync_user(current_user.id)
 
+      record_admin_event(event: "oauth_callback", result: "success")
       redirect_to live_metrics_page_url(connected: "pulsoid")
     rescue => e
+      record_admin_event(
+        event: "oauth_callback",
+        result: "connect_failed",
+        severity: "error",
+      )
       Rails.logger.warn("[live_metrics] Pulsoid OAuth callback failed user_id=#{current_user&.id} error=#{e.class}: #{e.message}")
       redirect_to live_metrics_page_url(error: "pulsoid_connect_failed")
     end
 
     def pulsoid_disconnect
       unless provider_accounts_table_ready?
+        record_admin_event(
+          event: "provider_disconnect",
+          result: "database_not_ready",
+          severity: "error",
+        )
         return render json: { disconnected: false, error: "database_not_ready" }, status: 503
       end
 
@@ -109,7 +152,15 @@ module ::LiveMetrics
         ::LiveMetrics::RefreshCoordinator.sync_user(current_user.id)
       end
 
+      record_admin_event(event: "provider_disconnect", result: "disconnected")
       render json: { disconnected: true }, status: 200
+    rescue => e
+      record_admin_event(
+        event: "provider_disconnect",
+        result: "disconnect_failed",
+        severity: "error",
+      )
+      raise
     end
 
     private
@@ -121,7 +172,22 @@ module ::LiveMetrics
     def ensure_can_share
       return if ::LiveMetrics::Permissions.can_share?(guardian)
 
+      record_admin_event(
+        event: action_name == "pulsoid_callback" ? "oauth_callback" : "oauth_start",
+        result: "sharing_denied",
+        severity: "warning",
+      )
       redirect_to live_metrics_page_url(error: "sharing_not_allowed")
+    end
+
+    def record_admin_event(event:, result:, severity: "info")
+      ::LiveMetrics::AdminEventLog.record(
+        provider: "pulsoid",
+        event: event,
+        result: result,
+        severity: severity,
+        client_context: ::LiveMetrics::AdminEventLog.client_context_for(request),
+      )
     end
 
     def safe_oauth_error(value)

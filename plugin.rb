@@ -48,6 +48,7 @@ after_initialize do
 
   require_dependency File.expand_path("app/models/live_metrics/provider_account.rb", __dir__)
   require_relative "lib/live_metrics/current_state_store"
+  require_relative "lib/live_metrics/admin_event_log"
   require_relative "lib/live_metrics/hyperate_streaming_registry"
   require_relative "lib/live_metrics/refresh_coordinator"
   require_relative "lib/live_metrics/hyperate_streaming_session"
@@ -66,6 +67,7 @@ after_initialize do
   require_dependency File.expand_path("app/controllers/live_metrics/auth_controller.rb", __dir__)
   require_dependency File.expand_path("app/controllers/live_metrics/api_controller.rb", __dir__)
   require_dependency File.expand_path("app/controllers/live_metrics/admin_health_controller.rb", __dir__)
+  require_dependency File.expand_path("app/controllers/live_metrics/admin_logs_controller.rb", __dir__)
 
   on(:site_setting_changed) do |name, _old_value, _new_value|
     next unless %i[
@@ -88,7 +90,11 @@ after_initialize do
   Discourse::Application.routes.append do
     get "/admin/plugins/live-metrics" => "admin/plugins#index", constraints: AdminConstraint.new
     get "/admin/plugins/live-metrics-health" => "admin/plugins#index", constraints: AdminConstraint.new
+    get "/admin/plugins/live-metrics-logs" => "admin/plugins#index", constraints: AdminConstraint.new
     get "/admin/plugins/live-metrics/health" => "live_metrics/admin_health#index",
+        defaults: { format: :json },
+        constraints: AdminConstraint.new
+    get "/admin/plugins/live-metrics/logs" => "live_metrics/admin_logs#index",
         defaults: { format: :json },
         constraints: AdminConstraint.new
 

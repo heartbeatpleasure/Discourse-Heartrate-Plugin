@@ -105,12 +105,54 @@ module ::LiveMetrics
     end
 
     def connect_hyperate
-      return live_metrics_render_error("database_not_ready", status: 503, message: database_not_ready_message) unless provider_accounts_table_ready?
-      return live_metrics_render_error("hyperate_disabled", status: 404) unless SiteSetting.live_metrics_hyperate_enabled
-      return live_metrics_render_error("hyperate_not_configured", status: 422, message: "HypeRate is enabled, but the API key is not configured yet.") unless ::LiveMetrics::HypeRateClient.configured?
+      unless provider_accounts_table_ready?
+        record_hyperate_admin_event(
+          event: "provider_connect",
+          result: "database_not_ready",
+          severity: "error",
+        )
+        return live_metrics_render_error(
+          "database_not_ready",
+          status: 503,
+          message: database_not_ready_message,
+        )
+      end
+
+      unless SiteSetting.live_metrics_hyperate_enabled
+        record_hyperate_admin_event(
+          event: "provider_connect",
+          result: "disabled",
+          severity: "warning",
+        )
+        return live_metrics_render_error("hyperate_disabled", status: 404)
+      end
+
+      unless ::LiveMetrics::HypeRateClient.configured?
+        record_hyperate_admin_event(
+          event: "provider_connect",
+          result: "not_configured",
+          severity: "warning",
+        )
+        return live_metrics_render_error(
+          "hyperate_not_configured",
+          status: 422,
+          message: "HypeRate is enabled, but the API key is not configured yet.",
+        )
+      end
 
       device_id = ::LiveMetrics::HypeRateClient.normalize_device_id(params[:device_id])
-      return live_metrics_render_error("invalid_hyperate_device_id", status: 422, message: "Enter a valid HypeRate device ID.") unless ::LiveMetrics::HypeRateClient.valid_device_id?(device_id)
+      unless ::LiveMetrics::HypeRateClient.valid_device_id?(device_id)
+        record_hyperate_admin_event(
+          event: "provider_connect",
+          result: "invalid_device_id",
+          severity: "warning",
+        )
+        return live_metrics_render_error(
+          "invalid_hyperate_device_id",
+          status: 422,
+          message: "Enter a valid HypeRate device ID.",
+        )
+      end
 
       account = ::LiveMetrics::ProviderAccount.find_or_initialize_by(
         user_id: current_user.id,
@@ -140,11 +182,30 @@ module ::LiveMetrics
       end
       ::LiveMetrics::RefreshCoordinator.sync_user(current_user.id)
 
+      record_hyperate_admin_event(event: "provider_connect", result: "success")
       live_metrics_render_json(current_user_payload(include_live: false, include_statistics: false), status: 200)
+    rescue
+      record_hyperate_admin_event(
+        event: "provider_connect",
+        result: "connect_failed",
+        severity: "error",
+      )
+      raise
     end
 
     def disconnect_hyperate
-      return live_metrics_render_error("database_not_ready", status: 503, message: database_not_ready_message) unless provider_accounts_table_ready?
+      unless provider_accounts_table_ready?
+        record_hyperate_admin_event(
+          event: "provider_disconnect",
+          result: "database_not_ready",
+          severity: "error",
+        )
+        return live_metrics_render_error(
+          "database_not_ready",
+          status: 503,
+          message: database_not_ready_message,
+        )
+      end
 
       account = ::LiveMetrics::ProviderAccount.find_by(
         user_id: current_user.id,
@@ -156,7 +217,18 @@ module ::LiveMetrics
       activate_fallback_account_for_user!(current_user) if was_active
       ::LiveMetrics::RefreshCoordinator.sync_user(current_user.id)
 
+      record_hyperate_admin_event(
+        event: "provider_disconnect",
+        result: "disconnected",
+      )
       live_metrics_render_json(disconnected: true)
+    rescue
+      record_hyperate_admin_event(
+        event: "provider_disconnect",
+        result: "disconnect_failed",
+        severity: "error",
+      )
+      raise
     end
 
     def directory
@@ -287,10 +359,28 @@ module ::LiveMetrics
     def ensure_can_share
       return if ::LiveMetrics::Permissions.can_share?(guardian)
 
+      if action_name == "connect_hyperate"
+        record_hyperate_admin_event(
+          event: "provider_connect",
+          result: "sharing_denied",
+          severity: "warning",
+        )
+      end
+
       live_metrics_render_error(
         "sharing_not_allowed",
         status: 403,
         message: "Your account is not allowed to connect or share heartrate data."
+      )
+    end
+
+    def record_hyperate_admin_event(event:, result:, severity: "info")
+      ::LiveMetrics::AdminEventLog.record(
+        provider: "hyperate",
+        event: event,
+        result: result,
+        severity: severity,
+        client_context: ::LiveMetrics::AdminEventLog.client_context_for(request),
       )
     end
 
