@@ -41,6 +41,26 @@ module ::LiveMetrics
       ::LiveMetrics::ProviderAccount::VISIBILITIES
     end
 
+    # New provider connections should be immediately useful while still respecting
+    # the visibility choices enabled by staff. Existing connections are never
+    # overwritten by these defaults.
+    def default_visibility_id
+      options = visibility_option_ids
+      return "logged_in" if options.include?("logged_in")
+      return "private" if options.include?("private")
+
+      options.first || "private"
+    end
+
+    def new_connection_sharing_defaults
+      {
+        visibility: default_visibility_id,
+        show_on_profile: false,
+        show_on_user_card: true,
+        show_in_directory: true,
+      }
+    end
+
     def user_in_any_group?(user, groups)
       return false if user.nil? || groups.blank?
 

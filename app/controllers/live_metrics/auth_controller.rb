@@ -90,15 +90,15 @@ module ::LiveMetrics
         user_id: current_user.id,
         provider: ::LiveMetrics::ProviderAccount::PROVIDER_PULSOID
       )
+      new_connection = account.new_record?
       if account.persisted? && ::LiveMetrics::RefreshCoordinator.async_enabled?
         ::LiveMetrics::RefreshCoordinator.stop(account, clear_fetch_lock: false)
       end
 
       ::LiveMetrics::PulsoidClient.apply_token_payload!(account, token_payload)
-      account.visibility ||= "private"
-      account.show_on_profile = false if account.show_on_profile.nil?
-      account.show_on_user_card = false if account.show_on_user_card.nil?
-      account.show_in_directory = false if account.show_in_directory.nil?
+      if new_connection
+        account.assign_attributes(::LiveMetrics::Permissions.new_connection_sharing_defaults)
+      end
       account.save!
       account.activate!
 

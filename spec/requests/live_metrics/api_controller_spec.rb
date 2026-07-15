@@ -4,6 +4,7 @@ RSpec.describe "LiveMetrics API", type: :request do
   fab!(:user)
   fab!(:viewer)
   fab!(:other_viewer)
+  fab!(:new_user)
   fab!(:admin)
   fab!(:account) do
     LiveMetrics::ProviderAccount.create!(
@@ -92,6 +93,55 @@ RSpec.describe "LiveMetrics API", type: :request do
     expect(response.status).to eq(200)
     expect(response.parsed_body.dig("account", "live", "status")).to eq("no_data")
     expect(response.parsed_body.dig("account", "live", "heart_rate")).to be_nil
+  end
+
+  it "enables overview and user-card sharing for a new HypeRate connection" do
+    SiteSetting.live_metrics_async_current_readings_enabled = false
+    SiteSetting.live_metrics_allowed_visibility_options = "private|logged_in"
+    sign_in(new_user)
+
+    LiveMetrics::HypeRateClient.stubs(:configured?).returns(true)
+    LiveMetrics::HypeRateClient.stubs(:normalize_device_id).returns("new-device")
+    LiveMetrics::HypeRateClient.stubs(:valid_device_id?).returns(true)
+
+    put "/live-metrics/api/connect/hyperate", params: { device_id: "new-device" }
+
+    expect(response.status).to eq(200)
+    connected = LiveMetrics::ProviderAccount.find_by!(
+      user: new_user,
+      provider: LiveMetrics::ProviderAccount::PROVIDER_HYPERATE,
+    )
+    expect(connected).to have_attributes(
+      active: true,
+      visibility: "logged_in",
+      show_on_user_card: true,
+      show_in_directory: true,
+      show_on_profile: false,
+    )
+  end
+
+  it "preserves sharing preferences when an existing HypeRate connection is updated" do
+    SiteSetting.live_metrics_async_current_readings_enabled = false
+    account.update!(
+      visibility: "private",
+      show_on_user_card: false,
+      show_in_directory: false,
+      show_on_profile: false,
+    )
+
+    LiveMetrics::HypeRateClient.stubs(:configured?).returns(true)
+    LiveMetrics::HypeRateClient.stubs(:normalize_device_id).returns("replacement-device")
+    LiveMetrics::HypeRateClient.stubs(:valid_device_id?).returns(true)
+
+    put "/live-metrics/api/connect/hyperate", params: { device_id: "replacement-device" }
+
+    expect(response.status).to eq(200)
+    expect(account.reload).to have_attributes(
+      visibility: "private",
+      show_on_user_card: false,
+      show_in_directory: false,
+      show_on_profile: false,
+    )
   end
 
   it "serves user-card readings from the batched current-state store" do

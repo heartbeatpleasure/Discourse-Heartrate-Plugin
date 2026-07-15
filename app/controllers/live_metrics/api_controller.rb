@@ -244,6 +244,7 @@ module ::LiveMetrics
         user_id: current_user.id,
         provider: ::LiveMetrics::ProviderAccount::PROVIDER_HYPERATE
       )
+      new_connection = account.new_record?
 
       if account.persisted? && ::LiveMetrics::RefreshCoordinator.async_enabled?
         ::LiveMetrics::RefreshCoordinator.stop(account, clear_fetch_lock: false)
@@ -252,10 +253,9 @@ module ::LiveMetrics
       account.provider_uid = device_id
       account.display_name = "HypeRate #{masked_device_id(device_id)}"
       account.profile_hash = { "device_id_last4" => device_id.last(4) }
-      account.visibility ||= "private"
-      account.show_on_profile = false if account.show_on_profile.nil?
-      account.show_on_user_card = false if account.show_on_user_card.nil?
-      account.show_in_directory = false if account.show_in_directory.nil?
+      if new_connection
+        account.assign_attributes(::LiveMetrics::Permissions.new_connection_sharing_defaults)
+      end
       account.access_token_cipher = nil
       account.refresh_token_cipher = nil
       account.token_expires_at = nil
