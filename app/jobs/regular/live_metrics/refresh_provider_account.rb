@@ -21,7 +21,14 @@ module Jobs
 
         account = ::LiveMetrics::ProviderAccount.find_by(id: account_id)
         unless coordinator.eligible?(account)
-          coordinator.stop(account_id)
+          if coordinator.any_streaming_eligible?(account)
+            # A queued legacy job may wake up just after streaming was enabled.
+            # Release only its own obsolete generation; never invalidate the new
+            # provider-specific stream session or overwrite/delete stream state.
+            coordinator.release_generation(account_id, generation)
+          else
+            coordinator.stop(account_id)
+          end
           return
         end
 

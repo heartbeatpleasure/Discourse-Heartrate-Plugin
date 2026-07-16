@@ -87,6 +87,11 @@ module ::LiveMetrics
             error: e,
             account_id: account_id,
           )
+          # Keep lifecycle cleanup idempotent and fail-closed even when the
+          # coordinator cannot complete one of its Redis actions. Numeric ids
+          # deliberately invalidate both provider registries.
+          ::LiveMetrics::HypeRateStreamingRegistry.invalidate_session(account_id) if defined?(::LiveMetrics::HypeRateStreamingRegistry)
+          ::LiveMetrics::PulsoidStreamingRegistry.invalidate_session(account_id) if defined?(::LiveMetrics::PulsoidStreamingRegistry)
           ::LiveMetrics::CurrentStateStore.delete(account_id)
         end
       end

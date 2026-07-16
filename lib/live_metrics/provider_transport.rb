@@ -29,6 +29,15 @@ module ::LiveMetrics
         )
       end
 
+      def pulsoid_wss_uri!(value)
+        validate_uri!(
+          value,
+          provider: "Pulsoid",
+          scheme: WSS_SCHEME,
+          allowed_root_domain: "pulsoid.net",
+        )
+      end
+
       def hyperate_wss_uri!(value)
         validate_uri!(
           value,
@@ -40,6 +49,13 @@ module ::LiveMetrics
 
       def valid_pulsoid_https_url?(value)
         pulsoid_https_uri!(value)
+        true
+      rescue InvalidUrl, URI::InvalidURIError
+        false
+      end
+
+      def valid_pulsoid_wss_url?(value)
+        pulsoid_wss_uri!(value)
         true
       rescue InvalidUrl, URI::InvalidURIError
         false

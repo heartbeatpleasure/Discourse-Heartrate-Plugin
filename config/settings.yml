@@ -130,6 +130,29 @@ plugins:
     type: string
     client: false
 
+  live_metrics_pulsoid_streaming_enabled:
+    default: false
+    client: false
+
+  live_metrics_pulsoid_ws_url:
+    default: "wss://dev.pulsoid.net/api/v1/data/real_time"
+    type: string
+    client: false
+
+  live_metrics_pulsoid_max_streams:
+    default: 100
+    type: integer
+    min: 1
+    max: 500
+    client: false
+
+  live_metrics_pulsoid_stream_transport_timeout_seconds:
+    default: 45
+    type: integer
+    min: 15
+    max: 120
+    client: false
+
   live_metrics_pulsoid_redirect_uri_override:
     default: ""
     type: string

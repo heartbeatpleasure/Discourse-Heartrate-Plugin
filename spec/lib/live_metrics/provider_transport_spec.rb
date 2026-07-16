@@ -27,6 +27,35 @@ RSpec.describe LiveMetrics::ProviderTransport do
     end
   end
 
+  describe ".pulsoid_wss_uri!" do
+    it "accepts secure WebSocket URLs on Pulsoid" do
+      uri = described_class.pulsoid_wss_uri!(
+        "wss://dev.pulsoid.net/api/v1/data/real_time",
+      )
+
+      expect(uri.scheme).to eq("wss")
+      expect(uri.host).to eq("dev.pulsoid.net")
+      expect(uri.port).to eq(443)
+    end
+
+    it "rejects unsafe Pulsoid WebSocket URLs" do
+      invalid_urls = [
+        "ws://dev.pulsoid.net/api/v1/data/real_time",
+        "wss://pulsoid.net.evil.test/api/v1/data/real_time",
+        "wss://user:password@dev.pulsoid.net/api/v1/data/real_time",
+        "wss://dev.pulsoid.net:8443/api/v1/data/real_time",
+        "wss://dev.pulsoid.net/#fragment",
+      ]
+
+      invalid_urls.each do |url|
+        expect { described_class.pulsoid_wss_uri!(url) }.to raise_error(
+          LiveMetrics::ProviderTransport::InvalidUrl,
+        )
+        expect(described_class.valid_pulsoid_wss_url?(url)).to eq(false)
+      end
+    end
+  end
+
   describe ".hyperate_wss_uri!" do
     it "accepts secure WebSocket URLs on HypeRate" do
       uri = described_class.hyperate_wss_uri!("wss://app.hyperate.io/ws/:deviceId")

@@ -90,4 +90,46 @@ RSpec.describe LiveMetrics::PulsoidClient do
     end.to raise_error(LiveMetrics::PulsoidClient::Error, /safe size limit/)
   end
 
+  it "classifies documented provider failures without exposing raw provider text" do
+    cases = {
+      [403, 7005] => :authorization_failed,
+      [403, 7006] => :token_expired,
+      [402, 7007] => :subscription_required,
+      [400, 7011] => :scope_required,
+      [400, 6003] => :scope_required,
+      [400, 7009] => :configuration_error,
+      [400, 7001] => :provider_unavailable,
+      [429, nil] => :rate_limited,
+      [503, nil] => :provider_unavailable,
+    }
+
+    cases.each do |(status, provider_code), expected|
+      body =
+        if provider_code
+          { error_code: provider_code, error_message: "secret provider detail" }.to_json
+        else
+          { error_message: "secret provider detail" }.to_json
+        end
+      error = described_class.error_for_response(status: status, body: body)
+
+      expect(error.classification).to eq(expected)
+      expect(error.message).not_to include("secret provider detail")
+      expect(error.body).to be_nil
+    end
+  end
+
+  it "uses the shared token manager for HTTP requests" do
+    snapshot = LiveMetrics::PulsoidTokenManager::Snapshot.new(
+      account_id: account.id,
+      access_token: "managed-access-token",
+      expires_at: 1.hour.from_now,
+      credential_fingerprint: "fingerprint",
+    )
+    LiveMetrics::PulsoidTokenManager.expects(:snapshot).with(account).returns(snapshot)
+
+    yielded = described_class.with_refreshed_token(account) { |token| token }
+
+    expect(yielded).to eq("managed-access-token")
+  end
+
 end

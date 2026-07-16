@@ -45,6 +45,14 @@ module ::LiveMetrics
       transport_stalled
       no_data
       transport_error
+      token_refresh_due
+      subscription_required
+      scope_required
+      rate_limited
+      provider_unavailable
+      configuration_error
+      protocol_error
+      reconnect_required
       unexpected_error
       stream_ended
       start_failed

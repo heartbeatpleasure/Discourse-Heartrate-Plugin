@@ -13,18 +13,42 @@ module ::LiveMetrics
     MAX_RESPONSE_BYTES = 1_048_576
 
     class Error < StandardError
-      attr_reader :status, :body
+      attr_reader :status, :body, :classification, :provider_code
 
-      def initialize(message, status: nil, body: nil)
+      def initialize(
+        message,
+        status: nil,
+        body: nil,
+        classification: :provider_unavailable,
+        provider_code: nil
+      )
         super(message)
-        @status = status
+        @status = status&.to_i
         @body = body
+        @classification = classification.to_sym
+        @provider_code = provider_code.to_s.presence
       end
     end
 
     class Unauthorized < Error; end
     class NoHeartRateData < Error; end
     class StaleCredentials < Error; end
+
+    PROVIDER_ERROR_CLASSIFICATIONS = {
+      "7005" => :authorization_failed,
+      "7006" => :token_expired,
+      "7007" => :subscription_required,
+      "7009" => :configuration_error,
+      "7010" => :configuration_error,
+      "7011" => :scope_required,
+      "6003" => :scope_required,
+      "7001" => :provider_unavailable,
+      "7002" => :provider_unavailable,
+      "7003" => :provider_unavailable,
+      "7004" => :provider_unavailable,
+      "6001" => :provider_unavailable,
+      "6002" => :provider_unavailable,
+    }.freeze
 
     def self.configured?
       return false unless SiteSetting.live_metrics_pulsoid_enabled
@@ -86,7 +110,10 @@ module ::LiveMetrics
     def self.refresh!(account)
       expected_refresh_token_cipher = account.refresh_token_cipher.to_s
       refresh_token = account.refresh_token
-      raise Unauthorized.new("Missing Pulsoid refresh token") if refresh_token.blank?
+      raise Unauthorized.new(
+        "Missing Pulsoid refresh token",
+        classification: :authorization_failed,
+      ) if refresh_token.blank?
 
       response = post_form(
         SiteSetting.live_metrics_pulsoid_token_url,
@@ -254,18 +281,41 @@ module ::LiveMetrics
     end
 
     def self.with_refreshed_token(account)
+      if defined?(::LiveMetrics::PulsoidTokenManager)
+        snapshot = ::LiveMetrics::PulsoidTokenManager.snapshot(account)
+        return yield snapshot.access_token
+      end
+
       refresh!(account) if account.token_refresh_recommended?
-
       token = account.access_token
-      raise Unauthorized.new("Missing Pulsoid access token") if token.blank?
+      raise Unauthorized.new(
+        "Missing Pulsoid access token",
+        classification: :authorization_failed,
+      ) if token.blank?
 
       yield token
-    rescue Unauthorized
-      refresh!(account)
-      token = account.access_token
-      raise Unauthorized.new("Missing Pulsoid access token after refresh") if token.blank?
+    rescue Unauthorized => original_error
+      begin
+        if defined?(::LiveMetrics::PulsoidTokenManager)
+          snapshot = ::LiveMetrics::PulsoidTokenManager.snapshot(account, force_refresh: true)
+          return yield snapshot.access_token
+        end
 
-      yield token
+        refresh!(account)
+        token = account.access_token
+        raise Unauthorized.new(
+          "Missing Pulsoid access token after refresh",
+          classification: :authorization_failed,
+        ) if token.blank?
+        yield token
+      rescue => refresh_error
+        token_manager_error =
+          defined?(::LiveMetrics::PulsoidTokenManager::Error) &&
+            refresh_error.is_a?(::LiveMetrics::PulsoidTokenManager::Error)
+        raise original_error if token_manager_error || refresh_error.is_a?(Error)
+
+        raise
+      end
     end
 
     def self.normalize_latest_response(response)
@@ -297,9 +347,32 @@ module ::LiveMetrics
     def self.parse_token_response!(response)
       body = parse_json(response.body)
       unless response.is_a?(Net::HTTPSuccess) && body["access_token"].present? && body["refresh_token"].present?
-        raise Error.new("Pulsoid token request failed", status: response.code.to_i, body: safe_body(response.body))
+        raise error_for_response(status: response.code.to_i, body: response.body)
       end
       body
+    end
+
+    def self.error_for_response(status:, body:)
+      status = status.to_i
+      parsed = parse_json(body)
+      provider_code = extract_provider_error_code(parsed)
+      classification = PROVIDER_ERROR_CLASSIFICATIONS[provider_code]
+      classification ||= classification_for_status(status)
+
+      error_class =
+        if %i[authorization_failed token_expired].include?(classification)
+          Unauthorized
+        else
+          Error
+        end
+
+      error_class.new(
+        safe_error_message(classification),
+        status: status,
+        body: nil,
+        classification: classification,
+        provider_code: provider_code,
+      )
     end
 
     def self.get_json(url, token:, query: nil)
@@ -311,11 +384,59 @@ module ::LiveMetrics
       request["User-Agent"] = USER_AGENT
 
       response = perform(uri, request)
-      raise NoHeartRateData.new("Pulsoid has no heart-rate data yet", status: 412) if response.code.to_i == 412
-      raise Unauthorized.new("Pulsoid authorization failed", status: response.code.to_i) if response.code.to_i == 401
-      raise Error.new("Pulsoid API request failed", status: response.code.to_i, body: safe_body(response.body)) unless response.is_a?(Net::HTTPSuccess)
+      if response.code.to_i == 412
+        raise NoHeartRateData.new(
+          "Pulsoid has no heart-rate data yet",
+          status: 412,
+          classification: :no_data,
+        )
+      end
+      raise error_for_response(status: response.code.to_i, body: response.body) unless response.is_a?(Net::HTTPSuccess)
 
       parse_json(response.body)
+    end
+
+
+    def self.extract_provider_error_code(parsed)
+      return nil unless parsed.is_a?(Hash)
+
+      value =
+        parsed["error_code"] ||
+          parsed.dig("error", "code") ||
+          parsed["code"]
+      value.to_s.presence
+    end
+
+    def self.classification_for_status(status)
+      case status.to_i
+      when 401, 403
+        :authorization_failed
+      when 402
+        :subscription_required
+      when 429
+        :rate_limited
+      when 500..599
+        :provider_unavailable
+      else
+        :provider_unavailable
+      end
+    end
+
+    def self.safe_error_message(classification)
+      case classification.to_sym
+      when :authorization_failed, :token_expired
+        "Pulsoid authorization failed."
+      when :subscription_required
+        "Pulsoid subscription is required."
+      when :scope_required
+        "Pulsoid permission is missing."
+      when :rate_limited
+        "Pulsoid rate limit was reached."
+      when :configuration_error
+        "Pulsoid authorization configuration is invalid."
+      else
+        "Pulsoid is temporarily unavailable."
+      end
     end
 
     def self.post_form(url, params)

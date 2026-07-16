@@ -69,6 +69,14 @@ RSpec.describe LiveMetrics::UserLifecycleCleanup do
       "lifecycle-lock",
       ex: 120,
     )
+    LiveMetrics::HypeRateStreamingRegistry.activate_session(
+      hyperate_account.id,
+      "lifecycle-hyperate-session",
+    )
+    LiveMetrics::PulsoidStreamingRegistry.activate_session(
+      pulsoid_account.id,
+      "lifecycle-pulsoid-session",
+    )
   end
 
   after do
@@ -91,6 +99,12 @@ RSpec.describe LiveMetrics::UserLifecycleCleanup do
     ).to be_nil
     expect(
       Discourse.redis.get(LiveMetrics::RefreshCoordinator.fetch_lock_key(hyperate_account.id)),
+    ).to be_nil
+    expect(
+      Discourse.redis.get(LiveMetrics::HypeRateStreamingRegistry.session_key(hyperate_account.id)),
+    ).to be_nil
+    expect(
+      Discourse.redis.get(LiveMetrics::PulsoidStreamingRegistry.session_key(pulsoid_account.id)),
     ).to be_nil
 
     audience_account.reload

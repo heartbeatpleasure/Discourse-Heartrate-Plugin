@@ -104,6 +104,44 @@ RSpec.describe "LiveMetrics Pulsoid OAuth", type: :request do
     )
   end
 
+  it "invalidates Pulsoid stream ownership and current state on disconnect" do
+    SiteSetting.live_metrics_async_current_readings_enabled = true
+    SiteSetting.live_metrics_pulsoid_streaming_enabled = true
+    SiteSetting.live_metrics_pulsoid_ws_url =
+      "wss://dev.pulsoid.net/api/v1/data/real_time"
+
+    account = LiveMetrics::ProviderAccount.new(
+      user: user,
+      provider: LiveMetrics::ProviderAccount::PROVIDER_PULSOID,
+      visibility: "private",
+      active: true,
+      show_on_profile: false,
+      show_on_user_card: false,
+      show_in_directory: false,
+    )
+    account.access_token = "disconnect-access"
+    account.refresh_token = "disconnect-refresh"
+    account.token_expires_at = 1.hour.from_now
+    account.save!
+
+    stream_token = "disconnect-session"
+    expect(LiveMetrics::PulsoidStreamingRegistry.activate_session(account, stream_token)).to eq(true)
+    LiveMetrics::CurrentStateStore.write(
+      account,
+      status: "live",
+      heart_rate: 89,
+      measured_at_ms: (Time.zone.now.to_f * 1000).to_i,
+    )
+    LiveMetrics::PulsoidClient.expects(:revoke).with { |candidate| candidate.id == account.id }.returns(true)
+
+    delete "/live-metrics/auth/pulsoid"
+
+    expect(response.status).to eq(200)
+    expect(LiveMetrics::ProviderAccount.find_by(id: account.id)).to be_nil
+    expect(LiveMetrics::PulsoidStreamingRegistry.session_current?(account.id, stream_token)).to eq(false)
+    expect(LiveMetrics::CurrentStateStore.read(account.id)).to be_nil
+  end
+
   it "records an OAuth state mismatch without weakening state validation" do
     get "/live-metrics/auth/pulsoid/callback",
         params: { state: "unexpected", code: "authorization-code" }

@@ -49,14 +49,20 @@ after_initialize do
   require_relative "lib/live_metrics/request_rate_limiter"
   require_relative "lib/live_metrics/permissions"
   require_relative "lib/live_metrics/pulsoid_client"
+  require_relative "lib/live_metrics/pulsoid_streaming_client"
   require_relative "lib/live_metrics/hyperate_client"
 
   require_dependency File.expand_path("app/models/live_metrics/provider_account.rb", __dir__)
   require_relative "lib/live_metrics/current_state_store"
+  require_relative "lib/live_metrics/pulsoid_token_manager"
   require_relative "lib/live_metrics/user_lifecycle_cleanup"
   require_relative "lib/live_metrics/admin_event_log"
   require_relative "lib/live_metrics/hyperate_streaming_registry"
+  require_relative "lib/live_metrics/pulsoid_streaming_registry"
   require_relative "lib/live_metrics/refresh_coordinator"
+  require_relative "lib/live_metrics/pulsoid_streaming_session"
+  require_relative "lib/live_metrics/pulsoid_streaming_supervisor"
+  require_relative "lib/live_metrics/pulsoid_streaming_demon"
   require_relative "lib/live_metrics/hyperate_streaming_session"
   require_relative "lib/live_metrics/hyperate_streaming_supervisor"
   require_relative "lib/live_metrics/hyperate_streaming_demon"
@@ -106,6 +112,13 @@ after_initialize do
       live_metrics_enabled
       live_metrics_async_current_readings_enabled
       live_metrics_pulsoid_enabled
+      live_metrics_pulsoid_streaming_enabled
+      live_metrics_pulsoid_ws_url
+      live_metrics_pulsoid_max_streams
+      live_metrics_pulsoid_stream_transport_timeout_seconds
+      live_metrics_pulsoid_client_id
+      live_metrics_pulsoid_client_secret
+      live_metrics_pulsoid_token_url
       live_metrics_hyperate_enabled
       live_metrics_hyperate_streaming_enabled
       live_metrics_hyperate_max_streams
@@ -118,6 +131,7 @@ after_initialize do
   end
 
   register_demon_process(::LiveMetrics::HypeRateStreamingDemon)
+  register_demon_process(::LiveMetrics::PulsoidStreamingDemon)
 
   Discourse::Application.routes.append do
     get "/admin/plugins/live-metrics" => "admin/plugins#index", constraints: AdminConstraint.new

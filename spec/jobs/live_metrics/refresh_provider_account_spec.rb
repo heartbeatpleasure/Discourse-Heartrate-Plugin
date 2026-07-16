@@ -181,4 +181,51 @@ RSpec.describe Jobs::LiveMetrics::RefreshProviderAccount do
   ensure
     LiveMetrics::RefreshCoordinator.release_fetch_lock(account, lock_token) if lock_token
   end
+  it "makes queued Pulsoid HTTP jobs a safe no-op after streaming is enabled" do
+    pulsoid = LiveMetrics::ProviderAccount.new(
+      user: Fabricate(:user),
+      provider: LiveMetrics::ProviderAccount::PROVIDER_PULSOID,
+      visibility: "private",
+      active: true,
+      show_on_profile: false,
+      show_on_user_card: false,
+      show_in_directory: false,
+    )
+    pulsoid.access_token = "queued-access"
+    pulsoid.refresh_token = "queued-refresh"
+    pulsoid.token_expires_at = 1.hour.from_now
+    pulsoid.save!
+
+    SiteSetting.live_metrics_pulsoid_enabled = true
+    SiteSetting.live_metrics_pulsoid_streaming_enabled = false
+    generation = LiveMetrics::RefreshCoordinator.start(pulsoid)
+
+    SiteSetting.live_metrics_pulsoid_streaming_enabled = true
+    SiteSetting.live_metrics_pulsoid_client_id = "client-id"
+    SiteSetting.live_metrics_pulsoid_client_secret = "client-secret"
+    SiteSetting.live_metrics_pulsoid_ws_url =
+      "wss://dev.pulsoid.net/api/v1/data/real_time"
+    stream_token = "new-stream-owner"
+    expect(LiveMetrics::PulsoidStreamingRegistry.activate_session(pulsoid, stream_token)).to eq(true)
+    LiveMetrics::CurrentStateStore.write(
+      pulsoid,
+      status: "live",
+      heart_rate: 91,
+      measured_at_ms: (Time.zone.now.to_f * 1000).to_i,
+    )
+    LiveMetrics::PulsoidClient.expects(:fetch_latest).never
+
+    described_class.new.execute(
+      account_id: pulsoid.id,
+      generation: generation,
+      attempt: 0,
+    )
+
+    expect(LiveMetrics::RefreshCoordinator.current_generation(pulsoid)).to be_nil
+    expect(LiveMetrics::PulsoidStreamingRegistry.session_current?(pulsoid, stream_token)).to eq(true)
+    expect(LiveMetrics::CurrentStateStore.read(pulsoid)[:heart_rate]).to eq(91)
+  ensure
+    LiveMetrics::RefreshCoordinator.stop(pulsoid) if pulsoid
+  end
+
 end

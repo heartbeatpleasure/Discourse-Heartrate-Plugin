@@ -110,6 +110,20 @@ RSpec.describe LiveMetrics::RefreshCoordinator do
     expect(described_class.current_generation(account)).to be_nil
   end
 
+  it "keeps HypeRate streaming eligibility independent from Pulsoid streaming" do
+    SiteSetting.live_metrics_hyperate_streaming_enabled = true
+    SiteSetting.live_metrics_pulsoid_enabled = true
+    SiteSetting.live_metrics_pulsoid_streaming_enabled = true
+    SiteSetting.live_metrics_pulsoid_client_id = "client-id"
+    SiteSetting.live_metrics_pulsoid_client_secret = "client-secret"
+    SiteSetting.live_metrics_pulsoid_ws_url =
+      "wss://dev.pulsoid.net/api/v1/data/real_time"
+
+    expect(described_class.streaming_eligible?(account)).to eq(true)
+    expect(described_class.pulsoid_streaming_eligible?(account)).to eq(false)
+    expect(described_class.any_streaming_eligible?(account)).to eq(true)
+  end
+
   it "preserves a streaming reading during routine recovery sync" do
     SiteSetting.live_metrics_hyperate_streaming_enabled = true
     LiveMetrics::CurrentStateStore.write(
@@ -124,7 +138,7 @@ RSpec.describe LiveMetrics::RefreshCoordinator do
     expect(LiveMetrics::CurrentStateStore.read(account)[:heart_rate]).to eq(83)
   end
 
-  it "keeps Pulsoid on the existing background refresh path" do
+  it "keeps Pulsoid on the existing background refresh path while streaming is off" do
     pulsoid_user = Fabricate(:user)
     pulsoid = LiveMetrics::ProviderAccount.create!(
       user: pulsoid_user,
@@ -138,12 +152,114 @@ RSpec.describe LiveMetrics::RefreshCoordinator do
       show_in_directory: false,
     )
     SiteSetting.live_metrics_pulsoid_enabled = true
+    SiteSetting.live_metrics_pulsoid_streaming_enabled = false
     SiteSetting.live_metrics_hyperate_streaming_enabled = true
 
     expect(described_class.streaming_eligible?(pulsoid)).to eq(false)
+    expect(described_class.pulsoid_streaming_eligible?(pulsoid)).to eq(false)
     expect(described_class.eligible?(pulsoid)).to eq(true)
   ensure
     described_class.stop(pulsoid) if pulsoid
+  end
+
+  it "moves Pulsoid out of Sidekiq only when its own streaming flag is operational" do
+    pulsoid_user = Fabricate(:user)
+    pulsoid = LiveMetrics::ProviderAccount.new(
+      user: pulsoid_user,
+      provider: LiveMetrics::ProviderAccount::PROVIDER_PULSOID,
+      visibility: "private",
+      active: true,
+      show_on_profile: false,
+      show_on_user_card: false,
+      show_in_directory: false,
+    )
+    pulsoid.access_token = "access"
+    pulsoid.refresh_token = "refresh"
+    pulsoid.token_expires_at = 1.hour.from_now
+    pulsoid.save!
+
+    SiteSetting.live_metrics_pulsoid_enabled = true
+    SiteSetting.live_metrics_pulsoid_streaming_enabled = true
+    SiteSetting.live_metrics_pulsoid_client_id = "client-id"
+    SiteSetting.live_metrics_pulsoid_client_secret = "client-secret"
+    SiteSetting.live_metrics_pulsoid_ws_url =
+      "wss://dev.pulsoid.net/api/v1/data/real_time"
+
+    described_class.expects(:enqueue_refresh).never
+    expect(described_class.start(pulsoid)).to be_nil
+    expect(described_class.pulsoid_streaming_eligible?(pulsoid)).to eq(true)
+    expect(described_class.any_streaming_eligible?(pulsoid)).to eq(true)
+    expect(described_class.eligible?(pulsoid)).to eq(false)
+    # The established HypeRate-specific predicate remains provider-specific.
+    expect(described_class.streaming_eligible?(pulsoid)).to eq(false)
+  ensure
+    described_class.stop(pulsoid) if pulsoid
+  end
+
+  it "falls back to the existing Pulsoid HTTP loop when the WSS setting is unsafe" do
+    pulsoid = LiveMetrics::ProviderAccount.new(
+      user: Fabricate(:user),
+      provider: LiveMetrics::ProviderAccount::PROVIDER_PULSOID,
+      visibility: "private",
+      active: true,
+      show_on_profile: false,
+      show_on_user_card: false,
+      show_in_directory: false,
+    )
+    pulsoid.access_token = "fallback-access"
+    pulsoid.refresh_token = "fallback-refresh"
+    pulsoid.token_expires_at = 1.hour.from_now
+    pulsoid.save!
+
+    SiteSetting.live_metrics_pulsoid_enabled = true
+    SiteSetting.live_metrics_pulsoid_streaming_enabled = true
+    SiteSetting.live_metrics_pulsoid_client_id = "client-id"
+    SiteSetting.live_metrics_pulsoid_client_secret = "client-secret"
+    SiteSetting.live_metrics_pulsoid_ws_url =
+      "wss://pulsoid.net.evil.test/api/v1/data/real_time"
+
+    expect(described_class.pulsoid_streaming_eligible?(pulsoid)).to eq(false)
+    expect(described_class.eligible?(pulsoid)).to eq(true)
+    expect(described_class.start(pulsoid)).to be_present
+  ensure
+    described_class.stop(pulsoid) if pulsoid
+  end
+
+  it "invalidates only the matching provider registry when an account object is available" do
+    pulsoid = LiveMetrics::ProviderAccount.new(
+      user: Fabricate(:user),
+      provider: LiveMetrics::ProviderAccount::PROVIDER_PULSOID,
+      visibility: "private",
+      active: true,
+      show_on_profile: false,
+      show_on_user_card: false,
+      show_in_directory: false,
+    )
+    pulsoid.access_token = "ownership-access"
+    pulsoid.refresh_token = "ownership-refresh"
+    pulsoid.save!
+
+    LiveMetrics::PulsoidStreamingRegistry.activate_session(pulsoid, "pulsoid-owner")
+    LiveMetrics::HypeRateStreamingRegistry.activate_session(pulsoid.id, "unrelated-owner")
+
+    described_class.stop(pulsoid)
+
+    expect(
+      LiveMetrics::PulsoidStreamingRegistry.session_current?(pulsoid, "pulsoid-owner"),
+    ).to eq(false)
+    expect(
+      LiveMetrics::HypeRateStreamingRegistry.session_current?(pulsoid.id, "unrelated-owner"),
+    ).to eq(true)
+  ensure
+    LiveMetrics::PulsoidStreamingRegistry.invalidate_session(pulsoid) if pulsoid
+    LiveMetrics::HypeRateStreamingRegistry.invalidate_session(pulsoid.id) if pulsoid
+  end
+
+  it "invalidates both registries for numeric lifecycle cleanup ids" do
+    LiveMetrics::HypeRateStreamingRegistry.expects(:invalidate_session).with(account.id)
+    LiveMetrics::PulsoidStreamingRegistry.expects(:invalidate_session).with(account.id)
+
+    described_class.stop(account.id)
   end
 
 end

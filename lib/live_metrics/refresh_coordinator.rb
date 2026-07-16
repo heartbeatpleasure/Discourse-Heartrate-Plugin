@@ -49,15 +49,41 @@ module ::LiveMetrics
         false
       end
 
-      # Eligibility for the legacy/background refresh chain. HypeRate accounts
-      # move out of Sidekiq while the dedicated streaming collector is enabled;
-      # Pulsoid deliberately remains on the existing proven background path.
+      def pulsoid_streaming_enabled?
+        async_enabled? &&
+          SiteSetting.live_metrics_pulsoid_enabled &&
+          SiteSetting.live_metrics_pulsoid_streaming_enabled &&
+          ::LiveMetrics::PulsoidClient.configured? &&
+          ::LiveMetrics::PulsoidStreamingClient.configured?
+      rescue
+        false
+      end
+
+      def pulsoid_streaming_eligible?(account)
+        return false unless pulsoid_streaming_enabled?
+        return false if account.blank? || !account.persisted?
+        return false unless account.pulsoid? && account.active? && account.connected?
+
+        ::LiveMetrics.enabled_provider_names.include?(account.provider)
+      rescue
+        false
+      end
+
+      def any_streaming_eligible?(account)
+        streaming_eligible?(account) || pulsoid_streaming_eligible?(account)
+      rescue
+        false
+      end
+
+      # Eligibility for the legacy/background refresh chain. A provider account
+      # is owned either by its dedicated streaming collector or by Sidekiq, never
+      # by both at the same time.
       def eligible?(account)
         return false unless async_enabled?
         return false if account.blank? || !account.persisted?
         return false unless account.active? && account.connected?
         return false unless ::LiveMetrics.enabled_provider_names.include?(account.provider)
-        return false if streaming_eligible?(account)
+        return false if any_streaming_eligible?(account)
 
         true
       rescue
@@ -65,12 +91,22 @@ module ::LiveMetrics
       end
 
       def start(account, replace: false)
-        if streaming_eligible?(account)
-          stop(account, clear_state: false, invalidate_stream: false)
+        if any_streaming_eligible?(account)
+          stop(
+            account,
+            clear_state: false,
+            clear_fetch_lock: false,
+            invalidate_stream: false,
+          )
           return nil
         end
 
         return stop(account) unless eligible?(account)
+
+        # When a streaming feature flag is turned off, revoke the old guarded
+        # writer before creating the HTTP generation. The socket may need a brief
+        # moment to close, but it can no longer write current state.
+        invalidate_stream_session(account, account.id)
 
         generation = SecureRandom.hex(16)
         created =
@@ -96,10 +132,10 @@ module ::LiveMetrics
       def restart(account)
         return nil if account.blank?
 
-        if streaming_eligible?(account)
-          # Invalidating the session token makes the collector close and replace
-          # the socket without allowing the old connection to write another
-          # reading after a device or credential change.
+        if any_streaming_eligible?(account)
+          # Invalidating the provider-specific session token makes the collector
+          # close and replace the socket without allowing the old connection to
+          # write another reading after a credential or provider change.
           stop(account, clear_state: true, clear_fetch_lock: false)
           return nil
         end
@@ -125,9 +161,7 @@ module ::LiveMetrics
         keys = [loop_key(account_id)]
         keys << fetch_lock_key(account_id) if clear_fetch_lock
         redis.del(*keys)
-        if invalidate_stream && defined?(::LiveMetrics::HypeRateStreamingRegistry)
-          ::LiveMetrics::HypeRateStreamingRegistry.invalidate_session(account_id)
-        end
+        invalidate_stream_session(account_or_id, account_id) if invalidate_stream
         ::LiveMetrics::CurrentStateStore.delete(account_id) if clear_state
         true
       rescue => e
@@ -287,20 +321,33 @@ module ::LiveMetrics
       private
 
       def sync_account(account)
-        if streaming_eligible?(account)
-          # Only remove the obsolete Sidekiq loop. The streaming collector owns
-          # the current Redis reading and must not be invalidated by recovery or
-          # an unrelated visibility/settings update.
+        if any_streaming_eligible?(account)
+          # Only remove the obsolete Sidekiq loop. The provider-specific streaming
+          # collector owns the current Redis reading and must not be invalidated
+          # by recovery or an unrelated visibility/settings update.
           stop(
             account,
             clear_state: false,
-            clear_fetch_lock: true,
+            clear_fetch_lock: false,
             invalidate_stream: false,
           )
         elsif eligible?(account)
           start(account)
         else
           stop(account)
+        end
+      end
+
+      def invalidate_stream_session(account_or_id, account_id)
+        provider = account_or_id.respond_to?(:provider) ? account_or_id.provider.to_s : nil
+
+        if provider == ::LiveMetrics::ProviderAccount::PROVIDER_HYPERATE
+          ::LiveMetrics::HypeRateStreamingRegistry.invalidate_session(account_id) if defined?(::LiveMetrics::HypeRateStreamingRegistry)
+        elsif provider == ::LiveMetrics::ProviderAccount::PROVIDER_PULSOID
+          ::LiveMetrics::PulsoidStreamingRegistry.invalidate_session(account_id) if defined?(::LiveMetrics::PulsoidStreamingRegistry)
+        else
+          ::LiveMetrics::HypeRateStreamingRegistry.invalidate_session(account_id) if defined?(::LiveMetrics::HypeRateStreamingRegistry)
+          ::LiveMetrics::PulsoidStreamingRegistry.invalidate_session(account_id) if defined?(::LiveMetrics::PulsoidStreamingRegistry)
         end
       end
 
