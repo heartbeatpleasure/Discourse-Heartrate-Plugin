@@ -59,4 +59,26 @@ RSpec.describe ProblemCheck::LiveMetricsOperationalHealth do
     )
     expect(problem.details[:issues]).to include("<ul>", "<li>")
   end
+  it "renders Pulsoid issues through the same aggregated admin notice" do
+    LiveMetrics::OperationalAlerts.stubs(:issues).returns(
+      [
+        {
+          code: :pulsoid_subscription_required,
+          values: { count: 3, window_minutes: 30 },
+        },
+        {
+          code: :pulsoid_repeated_stream_reconnects,
+          values: { count: 8, threshold: 8, window_minutes: 30 },
+        },
+      ],
+    )
+
+    problem = described_class.new.call
+
+    expect(problem.details[:issue_codes]).to eq(
+      "pulsoid_subscription_required,pulsoid_repeated_stream_reconnects",
+    )
+    expect(problem.details[:issues]).to include("Pulsoid")
+  end
+
 end

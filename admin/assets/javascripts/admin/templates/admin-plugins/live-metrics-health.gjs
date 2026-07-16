@@ -414,46 +414,54 @@ export default RouteTemplate(
           {{/if}}
         </section>
 
-        <section class="lm-health__panel">
-          <div class="lm-health__panel-header">
-            <div class="lm-health__panel-copy">
-              <h2>{{i18n "admin.live_metrics.health.activity_title"}}</h2>
-              <p class="lm-health__muted">
-                {{i18n "admin.live_metrics.health.activity_description"}}
-              </p>
+        {{#each @controller.collectorSections as |section|}}
+          <section class="lm-health__panel">
+            <div class="lm-health__panel-header">
+              <div class="lm-health__panel-copy">
+                <h2>{{section.title}}</h2>
+                <p class="lm-health__muted">{{section.description}}</p>
+              </div>
             </div>
-          </div>
 
-          <div class="lm-health__activity-grid">
-            {{#each @controller.activityCards as |card|}}
-              <article class="lm-health__activity-card">
-                <div class="lm-health__activity-label">{{card.label}}</div>
-                <div class="lm-health__activity-value">{{card.value}}</div>
-              </article>
-            {{/each}}
-          </div>
-        </section>
-
-        <section class="lm-health__panel">
-          <div class="lm-health__panel-header">
-            <div class="lm-health__panel-copy">
-              <h2>{{i18n "admin.live_metrics.health.operational_title"}}</h2>
-              <p class="lm-health__muted">
-                {{i18n "admin.live_metrics.health.operational_description"}}
-              </p>
+            <div class="lm-health__summary-grid">
+              {{#each section.summaryCards as |card|}}
+                <article class="lm-health__summary-card">
+                  <span class="lm-health__badge {{card.badgeClass}}">●</span>
+                  <div class="lm-health__card-label">{{card.label}}</div>
+                  <div class="lm-health__card-value">{{card.value}}</div>
+                  <div class="lm-health__card-detail">{{card.detail}}</div>
+                </article>
+              {{/each}}
             </div>
-          </div>
 
-          <div class="lm-health__rows">
-            {{#each @controller.operationalRows as |row|}}
-              <article class="lm-health__row">
-                <div class="lm-health__row-label">{{row.label}}</div>
-                <div class="lm-health__row-value">{{row.value}}</div>
-                <div class="lm-health__row-detail">{{row.detail}}</div>
-              </article>
-            {{/each}}
-          </div>
-        </section>
+            <h3>{{i18n "admin.live_metrics.health.activity_title"}}</h3>
+            <p class="lm-health__muted">
+              {{i18n "admin.live_metrics.health.activity_description"}}
+            </p>
+            <div class="lm-health__activity-grid">
+              {{#each section.activityCards as |card|}}
+                <article class="lm-health__activity-card">
+                  <div class="lm-health__activity-label">{{card.label}}</div>
+                  <div class="lm-health__activity-value">{{card.value}}</div>
+                </article>
+              {{/each}}
+            </div>
+
+            <h3>{{i18n "admin.live_metrics.health.operational_title"}}</h3>
+            <p class="lm-health__muted">
+              {{i18n "admin.live_metrics.health.operational_description"}}
+            </p>
+            <div class="lm-health__rows">
+              {{#each section.operationalRows as |row|}}
+                <article class="lm-health__row">
+                  <div class="lm-health__row-label">{{row.label}}</div>
+                  <div class="lm-health__row-value">{{row.value}}</div>
+                  <div class="lm-health__row-detail">{{row.detail}}</div>
+                </article>
+              {{/each}}
+            </div>
+          </section>
+        {{/each}}
 
         <section class="lm-health__panel">
           <div class="lm-health__panel-header">

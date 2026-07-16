@@ -82,6 +82,21 @@ RSpec.describe LiveMetrics::PulsoidClient do
     expect(described_class.configured?).to eq(false)
   end
 
+  it "requires a safe token-validation URL but no longer depends on the profile URL" do
+    SiteSetting.live_metrics_pulsoid_enabled = true
+    SiteSetting.live_metrics_pulsoid_client_id = "client-id"
+    SiteSetting.live_metrics_pulsoid_client_secret = "client-secret"
+    SiteSetting.live_metrics_pulsoid_profile_url = "http://untrusted.example/profile"
+    SiteSetting.live_metrics_pulsoid_validate_token_url =
+      "https://dev.pulsoid.net/api/v1/token/validate"
+
+    expect(described_class.configured?).to eq(true)
+
+    SiteSetting.live_metrics_pulsoid_validate_token_url =
+      "https://pulsoid.net.evil.test/api/v1/token/validate"
+    expect(described_class.configured?).to eq(false)
+  end
+
   it "rejects provider responses that exceed the safe size limit" do
     response = stub(body: "x" * (described_class::MAX_RESPONSE_BYTES + 1))
 
@@ -130,6 +145,118 @@ RSpec.describe LiveMetrics::PulsoidClient do
     yielded = described_class.with_refreshed_token(account) { |token| token }
 
     expect(yielded).to eq("managed-access-token")
+  end
+
+  it "rejects unsafe bearer-token values before creating an Authorization header" do
+    described_class.expects(:get_bearer_json).never
+
+    expect { described_class.validate_token!("unsafe\r\nHeader: value") }.to raise_error(
+      LiveMetrics::PulsoidClient::ValidationError,
+    )
+  end
+
+  it "validates the OAuth client, required scope, and positive token lifetime" do
+    SiteSetting.live_metrics_pulsoid_client_id = "client-id"
+    described_class.stubs(:get_bearer_json).with(
+      SiteSetting.live_metrics_pulsoid_validate_token_url,
+      token: "validated-access",
+    ).returns(
+      "token" => "must-not-be-returned",
+      "profile_id" => "must-not-be-returned",
+      "client_id" => "client-id",
+      "expires_in" => 1200,
+      "scopes" => ["data:heart_rate:read"],
+    )
+
+    result = described_class.validate_token!("validated-access")
+
+    expect(result).to eq(
+      "client_id" => "client-id",
+      "expires_in" => 1200,
+      "scopes" => ["data:heart_rate:read"],
+    )
+    expect(result.to_json).not_to include("must-not-be-returned", "profile_id", "token")
+  end
+
+  it "rejects tokens for another OAuth client" do
+    SiteSetting.live_metrics_pulsoid_client_id = "expected-client"
+    described_class.stubs(:get_bearer_json).returns(
+      "client_id" => "other-client",
+      "expires_in" => 1200,
+      "scopes" => ["data:heart_rate:read"],
+    )
+
+    expect { described_class.validate_token!("access") }.to raise_error(
+      LiveMetrics::PulsoidClient::ValidationError,
+    ) { |error| expect(error.classification).to eq(:configuration_error) }
+  end
+
+  it "rejects validation without the required heart-rate scope" do
+    SiteSetting.live_metrics_pulsoid_client_id = "client-id"
+    described_class.stubs(:get_bearer_json).returns(
+      "client_id" => "client-id",
+      "expires_in" => 1200,
+      "scopes" => ["data:statistics:read"],
+    )
+
+    expect { described_class.validate_token!("access") }.to raise_error(
+      LiveMetrics::PulsoidClient::ValidationError,
+    ) { |error| expect(error.classification).to eq(:scope_required) }
+  end
+
+  it "uses the shortest credible expiration from exchange and validation" do
+    described_class.stubs(:validate_token!).returns(
+      "client_id" => "client-id",
+      "expires_in" => 900,
+      "scopes" => ["data:heart_rate:read"],
+    )
+
+    expect(described_class.validate_token_payload!(refreshed_payload)).to eq(
+      "expires_in" => 900,
+      "scopes" => ["data:heart_rate:read"],
+    )
+  end
+
+  it "accepts revoke only on HTTP 200" do
+    described_class.stubs(:post_form).returns(stub(code: "200", body: ""))
+
+    expect(described_class.revoke(account)).to eq(true)
+  end
+
+  it "retries one transient revoke failure and then succeeds" do
+    described_class.stubs(:post_form).returns(
+      stub(code: "503", body: { error_code: 7004 }.to_json),
+      stub(code: "200", body: ""),
+    )
+
+    expect(described_class.revoke(account)).to eq(true)
+  end
+
+  it "refreshes once before retrying an expired-token revoke" do
+    expired = stub(code: "403", body: { error_code: 7006 }.to_json)
+    success = stub(code: "200", body: "")
+    described_class.stubs(:post_form).returns(expired, success)
+    snapshot = LiveMetrics::PulsoidTokenManager::Snapshot.new(
+      account_id: account.id,
+      access_token: "rotated-access",
+      expires_at: 1.hour.from_now,
+      credential_fingerprint: "new-fingerprint",
+    )
+    LiveMetrics::PulsoidTokenManager.expects(:snapshot).with(
+      account,
+      force_refresh: true,
+    ).returns(snapshot)
+
+    expect(described_class.revoke(account)).to eq(true)
+  end
+
+  it "returns false after at most two transient revoke attempts" do
+    described_class.expects(:post_form).twice.returns(
+      stub(code: "503", body: "{}"),
+    )
+    LiveMetrics::SafeLog.stubs(:warn)
+
+    expect(described_class.revoke(account)).to eq(false)
   end
 
 end

@@ -119,6 +119,7 @@ after_initialize do
       live_metrics_pulsoid_client_id
       live_metrics_pulsoid_client_secret
       live_metrics_pulsoid_token_url
+      live_metrics_pulsoid_validate_token_url
       live_metrics_hyperate_enabled
       live_metrics_hyperate_streaming_enabled
       live_metrics_hyperate_max_streams

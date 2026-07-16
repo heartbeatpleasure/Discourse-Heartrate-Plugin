@@ -2,6 +2,10 @@
 
 module ::LiveMetrics
   class AuthController < ::ApplicationController
+    PULSOID_OAUTH_STATES_KEY = :live_metrics_pulsoid_oauth_states
+    PULSOID_OAUTH_STATE_TTL = 10.minutes
+    PULSOID_OAUTH_STATE_LIMIT = 5
+
     RATE_LIMIT_ACTIONS = {
       "pulsoid_start" => :provider_connect,
       "pulsoid_disconnect" => :provider_disconnect,
@@ -37,7 +41,7 @@ module ::LiveMetrics
       end
 
       state = SecureRandom.hex(32)
-      session[:live_metrics_pulsoid_oauth_state] = state
+      store_oauth_state!(state)
 
       # OAuth must leave the Discourse host. On newer Rails/Discourse builds,
       # external redirects require allow_other_host to avoid a hard error page.
@@ -59,7 +63,6 @@ module ::LiveMetrics
     end
 
     def pulsoid_callback
-      expected_state = session.delete(:live_metrics_pulsoid_oauth_state).to_s
       received_state = params[:state].to_s
       code = params[:code].to_s
 
@@ -68,6 +71,7 @@ module ::LiveMetrics
       # problem as a generic state mismatch. Successful callbacks still require
       # an exact state match before exchanging the authorization code.
       if params[:error].present?
+        consume_oauth_state(received_state) if received_state.present?
         record_admin_event(
           event: "oauth_callback",
           result: "provider_error",
@@ -82,7 +86,7 @@ module ::LiveMetrics
         return redirect_to live_metrics_page_url(error: error_code)
       end
 
-      if expected_state.blank? || received_state.blank? || expected_state.bytesize != received_state.bytesize || !ActiveSupport::SecurityUtils.secure_compare(expected_state, received_state)
+      unless consume_oauth_state(received_state)
         record_admin_event(
           event: "oauth_callback",
           result: "state_mismatch",
@@ -110,6 +114,7 @@ module ::LiveMetrics
       end
 
       token_payload = ::LiveMetrics::PulsoidClient.exchange_code!(code: code)
+      validated_token = ::LiveMetrics::PulsoidClient.validate_token_payload!(token_payload)
 
       account = ::LiveMetrics::ProviderAccount.find_or_initialize_by(
         user_id: current_user.id,
@@ -120,21 +125,21 @@ module ::LiveMetrics
         ::LiveMetrics::RefreshCoordinator.stop(account, clear_fetch_lock: false)
       end
 
-      ::LiveMetrics::PulsoidClient.apply_token_payload!(account, token_payload)
+      ::LiveMetrics::PulsoidClient.apply_token_payload!(
+        account,
+        token_payload,
+        expires_in: validated_token.fetch("expires_in"),
+        validated_scopes: validated_token.fetch("scopes"),
+      )
       if new_connection
         account.assign_attributes(::LiveMetrics::Permissions.new_connection_sharing_defaults)
       end
+      account.provider_uid = nil
+      account.display_name = "Pulsoid account"
+      account.profile_data = nil
+      account.last_profile_synced_at = nil
       account.save!
       account.activate!
-
-      profile = ::LiveMetrics::PulsoidClient.profile(account)
-      if profile.present?
-        account.profile_hash = profile
-        account.provider_uid = profile["username"].presence || profile["login"].presence || profile["channel"].presence
-        account.display_name = profile["username"].presence || profile["channel"].presence || "Pulsoid account"
-        account.last_profile_synced_at = Time.zone.now
-        account.save!
-      end
 
       if ::LiveMetrics::RefreshCoordinator.async_enabled?
         ::LiveMetrics::RefreshCoordinator.start(account, replace: true)
@@ -143,6 +148,20 @@ module ::LiveMetrics
 
       record_admin_event(event: "oauth_callback", result: "success")
       redirect_to live_metrics_page_url(connected: "pulsoid")
+    rescue ::LiveMetrics::PulsoidClient::ValidationError => e
+      result, error_code = validation_error_codes(e)
+      record_admin_event(
+        event: "oauth_callback",
+        result: result,
+        severity: "warning",
+      )
+      ::LiveMetrics::SafeLog.warn(
+        "pulsoid_oauth_validation_failed",
+        error: e,
+        user_id: current_user&.id,
+        classification: e.classification,
+      )
+      redirect_to live_metrics_page_url(error: error_code)
     rescue => e
       record_admin_event(
         event: "oauth_callback",
@@ -175,7 +194,14 @@ module ::LiveMetrics
       if account.present?
         was_active = account.active?
         ::LiveMetrics::RefreshCoordinator.stop(account)
-        ::LiveMetrics::PulsoidClient.revoke(account)
+        revoked = ::LiveMetrics::PulsoidClient.revoke(account)
+        unless revoked
+          record_admin_event(
+            event: "provider_disconnect",
+            result: "revoke_failed",
+            severity: "warning",
+          )
+        end
         account.destroy!
         activate_fallback_account_for_user! if was_active
         ::LiveMetrics::RefreshCoordinator.sync_user(current_user.id)
@@ -183,7 +209,7 @@ module ::LiveMetrics
 
       record_admin_event(event: "provider_disconnect", result: "disconnected")
       render json: { disconnected: true }, status: 200
-    rescue => e
+    rescue
       record_admin_event(
         event: "provider_disconnect",
         result: "disconnect_failed",
@@ -231,6 +257,58 @@ module ::LiveMetrics
     def safe_oauth_error(value)
       normalized = value.to_s.downcase.strip
       OAUTH_ERROR_CODES.include?(normalized) ? normalized : "oauth_error"
+    end
+
+    def store_oauth_state!(state)
+      states = pruned_oauth_states
+      states << { "value" => state.to_s, "created_at" => Time.now.to_i }
+      session[PULSOID_OAUTH_STATES_KEY] = states.last(PULSOID_OAUTH_STATE_LIMIT)
+    end
+
+    def consume_oauth_state(received_state)
+      received_state = received_state.to_s
+      states = pruned_oauth_states
+      match_index = states.index do |entry|
+        secure_state_match?(entry["value"], received_state)
+      end
+
+      matched = match_index.present?
+      states.delete_at(match_index) if matched
+      session[PULSOID_OAUTH_STATES_KEY] = states
+      matched
+    end
+
+    def pruned_oauth_states
+      cutoff = Time.now.to_i - PULSOID_OAUTH_STATE_TTL.to_i
+      Array(session[PULSOID_OAUTH_STATES_KEY]).filter_map do |entry|
+        next unless entry.respond_to?(:[])
+
+        value = (entry["value"] || entry[:value]).to_s
+        created_at = (entry["created_at"] || entry[:created_at]).to_i
+        next if value.blank? || created_at < cutoff
+
+        { "value" => value, "created_at" => created_at }
+      end.last(PULSOID_OAUTH_STATE_LIMIT)
+    end
+
+    def secure_state_match?(expected, received)
+      expected = expected.to_s
+      received = received.to_s
+      return false if expected.blank? || received.blank?
+      return false unless expected.bytesize == received.bytesize
+
+      ActiveSupport::SecurityUtils.secure_compare(expected, received)
+    end
+
+    def validation_error_codes(error)
+      case error.classification.to_sym
+      when :scope_required
+        ["scope_required", "pulsoid_scope_required"]
+      when :configuration_error
+        ["client_mismatch", "pulsoid_client_mismatch"]
+      else
+        ["token_validation_failed", "pulsoid_token_validation_failed"]
+      end
     end
 
     def live_metrics_page_url(query = {})

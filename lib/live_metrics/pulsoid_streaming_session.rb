@@ -182,6 +182,7 @@ module ::LiveMetrics
                 record_connected
                 authorization_refresh_attempted = false
                 registry.touch_session(account_id, token)
+                sync_last_error(snapshot, nil)
                 write_error_state("no_data") if ::LiveMetrics::CurrentStateStore.read(account_id).blank?
               end,
               on_frame: lambda do
@@ -208,6 +209,7 @@ module ::LiveMetrics
             if token_refresh_due
               set_status(:reconnecting)
               record_reconnect(reason: :token_refresh_due)
+              sync_last_error(snapshot, "reconnecting")
               snapshot = token_manager.snapshot(account_id, force_refresh: true)
               next
             end
@@ -215,6 +217,7 @@ module ::LiveMetrics
             reconnect_attempt = 0 if stable_connection?(connected_at_monotonic)
             set_status(:reconnecting)
             record_reconnect(reason: :stream_ended)
+            sync_last_error(snapshot, "reconnecting")
             reconnect_attempt += 1
             sleep_interruptibly(reconnect_delay(reconnect_attempt))
           rescue ::LiveMetrics::PulsoidStreamingClient::ProviderError => e
@@ -227,6 +230,7 @@ module ::LiveMetrics
                 snapshot = token_manager.snapshot(account_id, force_refresh: true)
                 set_status(:reconnecting)
                 record_reconnect(reason: :authorization_failed)
+                sync_last_error(snapshot, "reconnecting")
                 next
               rescue => refresh_error
                 handle_error(refresh_error, snapshot, reconnect_attempt)
@@ -263,6 +267,7 @@ module ::LiveMetrics
             set_status(:reconnecting)
             record_reconnect(reason: :transport_error)
             write_error_state("unavailable")
+            sync_last_error(snapshot, "reconnecting")
             reconnect_attempt += 1
             ::LiveMetrics::SafeLog.warn(
               "pulsoid_stream_transport_failed",
@@ -277,6 +282,7 @@ module ::LiveMetrics
             set_status(:reconnecting)
             record_reconnect(reason: :unexpected_error)
             write_error_state("unavailable")
+            sync_last_error(snapshot, "provider_unavailable")
             reconnect_attempt += 1
             log_failure("run", e)
             sleep_interruptibly(reconnect_delay(reconnect_attempt))
@@ -321,25 +327,31 @@ module ::LiveMetrics
         set_status(:reconnecting)
         record_reconnect(reason: :protocol_error)
         write_error_state("unavailable")
+        sync_last_error(snapshot, "reconnecting")
       when :transport_stalled
         set_status(:reconnecting)
         record_reconnect(reason: :transport_stalled, stalled: true)
         write_error_state("unavailable")
+        sync_last_error(snapshot, "reconnecting")
       when :rate_limited
         set_status(:reconnecting)
         record_reconnect(reason: :rate_limited)
         write_error_state("unavailable")
+        sync_last_error(snapshot, "provider_unavailable")
       when :provider_unavailable
         set_status(:reconnecting)
         record_reconnect(reason: :provider_unavailable)
         write_error_state("unavailable")
+        sync_last_error(snapshot, "provider_unavailable")
       when :stream_ended
         set_status(:reconnecting)
         record_reconnect(reason: :stream_ended)
+        sync_last_error(snapshot, "reconnecting")
       else
         set_status(:reconnecting)
         record_reconnect(reason: :unexpected_error)
         write_error_state("unavailable")
+        sync_last_error(snapshot, "provider_unavailable")
       end
 
       ::LiveMetrics::SafeLog.warn(

@@ -48,7 +48,7 @@ en:
           overall:
             healthy:
               label: "Healthy"
-              description: "The HypeRate collector is reporting current health and no operational warnings are active."
+              description: "The expected Heartrate collectors are reporting current health and no operational warnings are active."
             attention:
               label: "Attention needed"
               description: "The collector is available, but one or more conditions should be reviewed."
@@ -57,9 +57,19 @@ en:
               description: "The collector is missing or a condition is preventing normal realtime operation."
             inactive:
               label: "Inactive"
-              description: "Persistent HypeRate streaming is not currently expected to run with the active settings. Pulsoid may still use the background refresh path."
+              description: "No persistent Heartrate collector is currently expected to run with the active settings. A provider may still use its legacy background refresh path."
+
+          providers:
+            hyperate: "HypeRate"
+            pulsoid: "Pulsoid"
+
+          collector_section:
+            title: "%{provider} collector"
+            description: "Privacy-safe operational state for the separate %{provider} streaming process. No account identifiers, credentials, or heart-rate values are included."
 
           cards:
+            provider_collector:
+              label: "%{provider} collector health"
             collector:
               label: "Collector health"
               running: "Reporting"
@@ -71,6 +81,7 @@ en:
               label: "Streaming sessions"
               value: "%{connected} connected / %{sessions} total"
               detail: "%{reconnecting} reconnecting, %{stalled} stalled, %{unauthorized} unauthorized"
+              pulsoid_detail: "%{subscription} subscription required, %{scope} scope required"
             capacity:
               label: "Stream capacity"
               reached: "The configured stream limit has been reached; additional eligible accounts must wait."
@@ -85,6 +96,7 @@ en:
             readings: "Valid reading events"
             reconnects: "Reconnects"
             stalls: "Transport stalls"
+            authorization_failures: "Authorization failures"
 
           operational:
             health_version: "Health payload version"
@@ -101,10 +113,17 @@ en:
           reconnect_reasons:
             none: "No reconnect recorded"
             stream_ended: "Stream ended"
+            token_refresh_due: "Token refresh due"
             transport_stalled: "Transport stalled"
             no_data: "Provider stream ended without data"
             transport_error: "Transport error"
             authorization_failed: "Authorization failed"
+            subscription_required: "Subscription required"
+            scope_required: "Scope required"
+            rate_limited: "Provider rate limited"
+            provider_unavailable: "Provider unavailable"
+            configuration_error: "Configuration error"
+            protocol_error: "Protocol error"
             unexpected_error: "Unexpected error"
             unknown: "Unknown operational reason"
 
@@ -116,12 +135,17 @@ en:
             plugin_enabled: "Heartrate plugin"
             async_enabled: "Async current readings"
             hyperate_enabled: "HypeRate provider"
-            streaming_enabled: "Persistent HypeRate streaming setting"
-            streaming_operational: "Persistent HypeRate streaming operational"
-            client_configured: "HypeRate client configured"
+            hyperate_streaming_enabled: "Persistent HypeRate streaming setting"
+            hyperate_streaming_operational: "Persistent HypeRate streaming operational"
+            hyperate_client_configured: "HypeRate client configured"
+            hyperate_max_streams: "Maximum HypeRate streams"
+            hyperate_timeout: "HypeRate transport stall timeout"
             pulsoid_enabled: "Pulsoid provider"
-            max_streams: "Maximum HypeRate streams"
-            stall_timeout: "Transport stall timeout"
+            pulsoid_streaming_enabled: "Persistent Pulsoid streaming setting"
+            pulsoid_streaming_operational: "Persistent Pulsoid streaming operational"
+            pulsoid_client_configured: "Pulsoid OAuth client configured"
+            pulsoid_max_streams: "Maximum Pulsoid streams"
+            pulsoid_timeout: "Pulsoid transport liveness timeout"
             frontend_poll: "Frontend poll interval"
             provider_refresh: "Background provider refresh interval"
             live_threshold: "Live threshold"
@@ -174,6 +198,45 @@ en:
             active_accounts_without_sessions:
               title: "Active HypeRate accounts have no sessions"
               description: "%{count} active HypeRate account(s) exist, but the collector currently reports zero managed sessions."
+            pulsoid_async_disabled:
+              title: "Async current readings are disabled for Pulsoid"
+              description: "Persistent Pulsoid streaming is enabled, but it cannot start until async current readings are enabled."
+            pulsoid_disabled:
+              title: "Pulsoid is disabled"
+              description: "Persistent Pulsoid streaming is enabled, but the Pulsoid provider itself is disabled."
+            pulsoid_not_configured:
+              title: "Pulsoid is not configured"
+              description: "Persistent Pulsoid streaming is requested, but the server-side Pulsoid OAuth or token-validation configuration is incomplete."
+            pulsoid_collector_health_missing:
+              title: "Pulsoid collector health is unavailable"
+              description: "Pulsoid streaming is expected, but no health snapshot is available. A healthy collector refreshes this snapshot continuously and it expires after %{critical_age_seconds} seconds."
+            pulsoid_collector_health_critical:
+              title: "Pulsoid collector health is too old"
+              description: "The latest Pulsoid health snapshot is %{age_seconds} seconds old, exceeding the %{critical_age_seconds}-second critical threshold."
+            pulsoid_collector_health_stale:
+              title: "Pulsoid collector health is delayed"
+              description: "The latest Pulsoid health snapshot is %{age_seconds} seconds old. Healthy snapshots are normally newer than %{warning_age_seconds} seconds."
+            pulsoid_stream_limit_reached:
+              title: "Pulsoid stream limit reached"
+              description: "%{sessions} Pulsoid sessions are currently managed within a configured limit of %{limit}. Additional eligible accounts cannot start until capacity becomes available."
+            pulsoid_stalled_sessions:
+              title: "Stalled Pulsoid sessions detected"
+              description: "%{count} Pulsoid session(s) are marked stalled by the transport watchdog."
+            pulsoid_unauthorized_sessions:
+              title: "Unauthorized Pulsoid sessions detected"
+              description: "%{count} Pulsoid session(s) cannot complete provider authorization."
+            pulsoid_reconnecting_sessions:
+              title: "Pulsoid sessions are reconnecting"
+              description: "%{count} Pulsoid session(s) are currently reconnecting. This can be transient; refresh the page to confirm recovery."
+            pulsoid_active_accounts_without_sessions:
+              title: "Active Pulsoid accounts have no sessions"
+              description: "%{count} active Pulsoid account(s) exist, but the collector currently reports zero managed sessions."
+            pulsoid_subscription_required_sessions:
+              title: "Pulsoid subscription is required"
+              description: "%{count} Pulsoid session(s) cannot stream because the required Pulsoid plan is unavailable."
+            pulsoid_scope_required_sessions:
+              title: "Pulsoid permission is incomplete"
+              description: "%{count} Pulsoid session(s) are missing the required heart-rate read scope and must be reauthorized."
 
         logs:
           title: "Heartrate logs"
@@ -229,12 +292,15 @@ en:
             redirected: "Redirected to provider"
             success: "Successful"
             disconnected: "Disconnected"
+            revoke_failed: "Remote revoke failed; local disconnect completed"
             recovered: "Recovered"
             sharing_denied: "Sharing not allowed"
             not_configured: "Provider not configured"
             state_mismatch: "OAuth state mismatch"
             provider_error: "Provider returned an OAuth error"
             missing_authorization_code: "Authorization code missing"
+            token_validation_failed: "Token validation failed"
+            client_mismatch: "Token belongs to another OAuth client"
             database_not_ready: "Database not ready"
             connect_failed: "Connect failed"
             disconnect_failed: "Disconnect failed"

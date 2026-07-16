@@ -4,17 +4,24 @@ import { tracked } from "@glimmer/tracking";
 import { ajax } from "discourse/lib/ajax";
 import { i18n } from "discourse-i18n";
 
+const PROVIDERS = ["hyperate", "pulsoid"];
 const RECONNECT_REASON_KEYS = new Set([
   "none",
   "stream_ended",
+  "token_refresh_due",
   "transport_stalled",
   "no_data",
   "transport_error",
   "authorization_failed",
+  "subscription_required",
+  "scope_required",
+  "rate_limited",
+  "provider_unavailable",
+  "configuration_error",
+  "protocol_error",
   "unexpected_error",
   "unknown",
 ]);
-
 const JOIN_RESULT_KEYS = new Set(["none", "successful"]);
 
 function formatNumber(value) {
@@ -92,6 +99,33 @@ function extractError(error) {
   );
 }
 
+function freshnessSeverity(collector) {
+  if (!collector.expected) {
+    return "info";
+  }
+  if (!collector.available) {
+    return "critical";
+  }
+  return Number(collector.age_seconds || 0) >= 5 ? "warning" : "ok";
+}
+
+function sessionSeverity(collector) {
+  if (
+    Number(collector.stalled || 0) > 0 ||
+    Number(collector.unauthorized || 0) > 0 ||
+    Number(collector.scope_required || 0) > 0
+  ) {
+    return "critical";
+  }
+  if (
+    Number(collector.reconnecting || 0) > 0 ||
+    Number(collector.subscription_required || 0) > 0
+  ) {
+    return "warning";
+  }
+  return collector.expected ? "ok" : "info";
+}
+
 export default class AdminPluginsLiveMetricsHealthController extends Controller {
   @tracked data = null;
   @tracked isLoading = false;
@@ -164,24 +198,26 @@ export default class AdminPluginsLiveMetricsHealthController extends Controller 
     return this.warningItems.length > 0;
   }
 
-  get summaryCards() {
-    const collector = this.data?.collector || {};
-    const accounts = this.data?.accounts || {};
-    const limit = Number(collector.limit || 0);
-    const sessions = Number(collector.sessions || 0);
-    const capacitySeverity = collector.limit_reached ? "warning" : "ok";
-    const freshnessSeverity =
-      collector.expected && !collector.available
-        ? "critical"
-        : Number(collector.age_seconds || 0) >= 5
-          ? "warning"
-          : collector.expected
-            ? "ok"
-            : "info";
+  collectorFor(provider) {
+    return (
+      this.data?.collectors?.[provider] ||
+      (provider === "hyperate" ? this.data?.collector : null) ||
+      {}
+    );
+  }
 
-    return [
-      {
-        label: i18n("admin.live_metrics.health.cards.collector.label"),
+  providerLabel(provider) {
+    return i18n(`admin.live_metrics.health.providers.${provider}`);
+  }
+
+  get summaryCards() {
+    const accounts = this.data?.accounts || {};
+    const providerCards = PROVIDERS.map((provider) => {
+      const collector = this.collectorFor(provider);
+      return {
+        label: i18n("admin.live_metrics.health.cards.provider_collector.label", {
+          provider: this.providerLabel(provider),
+        }),
         value: collector.expected
           ? collector.available
             ? i18n("admin.live_metrics.health.cards.collector.running")
@@ -192,123 +228,168 @@ export default class AdminPluginsLiveMetricsHealthController extends Controller 
               age: formatAge(collector.age_seconds),
             })
           : i18n("admin.live_metrics.health.cards.collector.no_health"),
-        badgeClass: severityBadgeClass(freshnessSeverity),
-      },
-      {
-        label: i18n("admin.live_metrics.health.cards.sessions.label"),
-        value: i18n("admin.live_metrics.health.cards.sessions.value", {
-          connected: formatNumber(collector.connected),
-          sessions: formatNumber(collector.sessions),
-        }),
-        detail: i18n("admin.live_metrics.health.cards.sessions.detail", {
+        badgeClass: severityBadgeClass(freshnessSeverity(collector)),
+      };
+    });
+
+    providerCards.push({
+      label: i18n("admin.live_metrics.health.cards.accounts.label"),
+      value: accounts.available
+        ? formatNumber(accounts.active_total)
+        : i18n("admin.live_metrics.health.not_available"),
+      detail: accounts.available
+        ? i18n("admin.live_metrics.health.cards.accounts.detail", {
+            hyperate: formatNumber(accounts.active_hyperate),
+            pulsoid: formatNumber(accounts.active_pulsoid),
+          })
+        : i18n("admin.live_metrics.health.cards.accounts.unavailable"),
+      badgeClass: severityBadgeClass(accounts.available ? "ok" : "warning"),
+    });
+
+    return providerCards;
+  }
+
+  get collectorSections() {
+    return PROVIDERS.map((provider) => {
+      const collector = this.collectorFor(provider);
+      const reconnectReason = RECONNECT_REASON_KEYS.has(
+        String(collector.last_reconnect_reason)
+      )
+        ? String(collector.last_reconnect_reason)
+        : "unknown";
+      const joinResult = JOIN_RESULT_KEYS.has(String(collector.last_join_result))
+        ? String(collector.last_join_result)
+        : "none";
+      const detailParts = [
+        i18n("admin.live_metrics.health.cards.sessions.detail", {
           reconnecting: formatNumber(collector.reconnecting),
           stalled: formatNumber(collector.stalled),
           unauthorized: formatNumber(collector.unauthorized),
         }),
-        badgeClass: severityBadgeClass(
-          Number(collector.stalled || 0) > 0 ||
-            Number(collector.unauthorized || 0) > 0
-            ? "critical"
-            : Number(collector.reconnecting || 0) > 0
-              ? "warning"
-              : "ok"
-        ),
-      },
-      {
-        label: i18n("admin.live_metrics.health.cards.capacity.label"),
-        value: limit > 0 ? `${formatNumber(sessions)} / ${formatNumber(limit)}` : "—",
-        detail: collector.limit_reached
-          ? i18n("admin.live_metrics.health.cards.capacity.reached")
-          : i18n("admin.live_metrics.health.cards.capacity.available"),
-        badgeClass: severityBadgeClass(capacitySeverity),
-      },
-      {
-        label: i18n("admin.live_metrics.health.cards.accounts.label"),
-        value: accounts.available
-          ? formatNumber(accounts.active_total)
-          : i18n("admin.live_metrics.health.not_available"),
-        detail: accounts.available
-          ? i18n("admin.live_metrics.health.cards.accounts.detail", {
-              hyperate: formatNumber(accounts.active_hyperate),
-              pulsoid: formatNumber(accounts.active_pulsoid),
-            })
-          : i18n("admin.live_metrics.health.cards.accounts.unavailable"),
-        badgeClass: severityBadgeClass(accounts.available ? "ok" : "warning"),
-      },
-    ];
-  }
+      ];
+      if (provider === "pulsoid") {
+        detailParts.push(
+          i18n("admin.live_metrics.health.cards.sessions.pulsoid_detail", {
+            subscription: formatNumber(collector.subscription_required),
+            scope: formatNumber(collector.scope_required),
+          })
+        );
+      }
 
-  get activityCards() {
-    const collector = this.data?.collector || {};
-    return [
-      {
-        label: i18n("admin.live_metrics.health.activity.frames"),
-        value: formatNumber(collector.frames),
-      },
-      {
-        label: i18n("admin.live_metrics.health.activity.readings"),
-        value: formatNumber(collector.readings),
-      },
-      {
-        label: i18n("admin.live_metrics.health.activity.reconnects"),
-        value: formatNumber(collector.reconnects),
-      },
-      {
-        label: i18n("admin.live_metrics.health.activity.stalls"),
-        value: formatNumber(collector.stalls),
-      },
-    ];
-  }
-
-  get operationalRows() {
-    const collector = this.data?.collector || {};
-    const reconnectReason = RECONNECT_REASON_KEYS.has(
-      String(collector.last_reconnect_reason)
-    )
-      ? String(collector.last_reconnect_reason)
-      : "unknown";
-    const joinResult = JOIN_RESULT_KEYS.has(String(collector.last_join_result))
-      ? String(collector.last_join_result)
-      : "none";
-
-    return [
-      {
-        label: i18n("admin.live_metrics.health.operational.health_version"),
-        value: collector.version
-          ? `v${formatNumber(collector.version)}`
-          : i18n("admin.live_metrics.health.not_available"),
-        detail: i18n("admin.live_metrics.health.operational.health_version_detail"),
-      },
-      {
-        label: i18n("admin.live_metrics.health.operational.last_join_result"),
-        value: i18n(
-          `admin.live_metrics.health.join_results.${joinResult}`
+      return {
+        provider,
+        title: i18n("admin.live_metrics.health.collector_section.title", {
+          provider: this.providerLabel(provider),
+        }),
+        description: i18n(
+          "admin.live_metrics.health.collector_section.description",
+          { provider: this.providerLabel(provider) }
         ),
-        detail: formatDateTime(collector.last_successful_join_at),
-      },
-      {
-        label: i18n("admin.live_metrics.health.operational.last_reconnect_reason"),
-        value: i18n(
-          `admin.live_metrics.health.reconnect_reasons.${reconnectReason}`
-        ),
-        detail: formatDateTime(collector.last_reconnect_at),
-      },
-      {
-        label: i18n("admin.live_metrics.health.operational.oldest_frame"),
-        value: formatAge(collector.oldest_frame_age_seconds),
-        detail: i18n("admin.live_metrics.health.operational.oldest_frame_detail"),
-      },
-      {
-        label: i18n("admin.live_metrics.health.operational.oldest_event"),
-        value: formatAge(collector.oldest_event_age_seconds),
-        detail: i18n("admin.live_metrics.health.operational.oldest_event_detail"),
-      },
-      {
-        label: i18n("admin.live_metrics.health.operational.collector_started"),
-        value: formatDateTime(collector.collector_started_at),
-        detail: i18n("admin.live_metrics.health.operational.collector_started_detail"),
-      },
-    ];
+        summaryCards: [
+          {
+            label: i18n("admin.live_metrics.health.cards.sessions.label"),
+            value: i18n("admin.live_metrics.health.cards.sessions.value", {
+              connected: formatNumber(collector.connected),
+              sessions: formatNumber(collector.sessions),
+            }),
+            detail: detailParts.join(" · "),
+            badgeClass: severityBadgeClass(sessionSeverity(collector)),
+          },
+          {
+            label: i18n("admin.live_metrics.health.cards.capacity.label"),
+            value:
+              Number(collector.limit || 0) > 0
+                ? `${formatNumber(collector.sessions)} / ${formatNumber(
+                    collector.limit
+                  )}`
+                : "—",
+            detail: collector.limit_reached
+              ? i18n("admin.live_metrics.health.cards.capacity.reached")
+              : i18n("admin.live_metrics.health.cards.capacity.available"),
+            badgeClass: severityBadgeClass(
+              collector.limit_reached
+                ? "warning"
+                : collector.expected
+                  ? "ok"
+                  : "info"
+            ),
+          },
+        ],
+        activityCards: [
+          {
+            label: i18n("admin.live_metrics.health.activity.frames"),
+            value: formatNumber(collector.frames),
+          },
+          {
+            label: i18n("admin.live_metrics.health.activity.readings"),
+            value: formatNumber(collector.readings),
+          },
+          {
+            label: i18n("admin.live_metrics.health.activity.reconnects"),
+            value: formatNumber(collector.reconnects),
+          },
+          {
+            label:
+              provider === "pulsoid"
+                ? i18n("admin.live_metrics.health.activity.authorization_failures")
+                : i18n("admin.live_metrics.health.activity.stalls"),
+            value: formatNumber(
+              provider === "pulsoid"
+                ? collector.authorization_failures
+                : collector.stalls
+            ),
+          },
+        ],
+        operationalRows: [
+          {
+            label: i18n("admin.live_metrics.health.operational.health_version"),
+            value: collector.version
+              ? `v${formatNumber(collector.version)}`
+              : i18n("admin.live_metrics.health.not_available"),
+            detail: i18n(
+              "admin.live_metrics.health.operational.health_version_detail"
+            ),
+          },
+          {
+            label: i18n("admin.live_metrics.health.operational.last_join_result"),
+            value: i18n(`admin.live_metrics.health.join_results.${joinResult}`),
+            detail: formatDateTime(collector.last_successful_join_at),
+          },
+          {
+            label: i18n(
+              "admin.live_metrics.health.operational.last_reconnect_reason"
+            ),
+            value: i18n(
+              `admin.live_metrics.health.reconnect_reasons.${reconnectReason}`
+            ),
+            detail: formatDateTime(collector.last_reconnect_at),
+          },
+          {
+            label: i18n("admin.live_metrics.health.operational.oldest_frame"),
+            value: formatAge(collector.oldest_frame_age_seconds),
+            detail: i18n(
+              "admin.live_metrics.health.operational.oldest_frame_detail"
+            ),
+          },
+          {
+            label: i18n("admin.live_metrics.health.operational.oldest_event"),
+            value: formatAge(collector.oldest_event_age_seconds),
+            detail: i18n(
+              "admin.live_metrics.health.operational.oldest_event_detail"
+            ),
+          },
+          {
+            label: i18n(
+              "admin.live_metrics.health.operational.collector_started"
+            ),
+            value: formatDateTime(collector.collector_started_at),
+            detail: i18n(
+              "admin.live_metrics.health.operational.collector_started_detail"
+            ),
+          },
+        ],
+      };
+    });
   }
 
   get configurationRows() {
@@ -327,28 +408,62 @@ export default class AdminPluginsLiveMetricsHealthController extends Controller 
         value: enabledLabel(configuration.hyperate_enabled),
       },
       {
-        label: i18n("admin.live_metrics.health.configuration.streaming_enabled"),
+        label: i18n(
+          "admin.live_metrics.health.configuration.hyperate_streaming_enabled"
+        ),
         value: enabledLabel(configuration.hyperate_streaming_setting_enabled),
       },
       {
-        label: i18n("admin.live_metrics.health.configuration.streaming_operational"),
+        label: i18n(
+          "admin.live_metrics.health.configuration.hyperate_streaming_operational"
+        ),
         value: enabledLabel(configuration.hyperate_streaming_operational),
       },
       {
-        label: i18n("admin.live_metrics.health.configuration.client_configured"),
+        label: i18n(
+          "admin.live_metrics.health.configuration.hyperate_client_configured"
+        ),
         value: yesNoLabel(configuration.hyperate_client_configured),
+      },
+      {
+        label: i18n("admin.live_metrics.health.configuration.hyperate_max_streams"),
+        value: formatNumber(configuration.hyperate_max_streams),
+      },
+      {
+        label: i18n("admin.live_metrics.health.configuration.hyperate_timeout"),
+        value: formatAge(configuration.hyperate_stream_stall_timeout_seconds),
       },
       {
         label: i18n("admin.live_metrics.health.configuration.pulsoid_enabled"),
         value: enabledLabel(configuration.pulsoid_enabled),
       },
       {
-        label: i18n("admin.live_metrics.health.configuration.max_streams"),
-        value: formatNumber(configuration.hyperate_max_streams),
+        label: i18n(
+          "admin.live_metrics.health.configuration.pulsoid_streaming_enabled"
+        ),
+        value: enabledLabel(configuration.pulsoid_streaming_setting_enabled),
       },
       {
-        label: i18n("admin.live_metrics.health.configuration.stall_timeout"),
-        value: formatAge(configuration.hyperate_stream_stall_timeout_seconds),
+        label: i18n(
+          "admin.live_metrics.health.configuration.pulsoid_streaming_operational"
+        ),
+        value: enabledLabel(configuration.pulsoid_streaming_operational),
+      },
+      {
+        label: i18n(
+          "admin.live_metrics.health.configuration.pulsoid_client_configured"
+        ),
+        value: yesNoLabel(configuration.pulsoid_client_configured),
+      },
+      {
+        label: i18n("admin.live_metrics.health.configuration.pulsoid_max_streams"),
+        value: formatNumber(configuration.pulsoid_max_streams),
+      },
+      {
+        label: i18n("admin.live_metrics.health.configuration.pulsoid_timeout"),
+        value: formatAge(
+          configuration.pulsoid_stream_transport_timeout_seconds
+        ),
       },
       {
         label: i18n("admin.live_metrics.health.configuration.frontend_poll"),

@@ -445,7 +445,7 @@ module ::LiveMetrics
       account = ::LiveMetrics::ProviderAccount.enabled_providers.active.profile_enabled.find_by(user_id: user.id)
       raise Discourse::NotFound if account.blank? || !can_view_account?(account, surface: :profile)
 
-      live_metrics_render_json(account_payload(account, include_user: true, include_live: true, include_statistics: true, surface: :profile))
+      live_metrics_render_json(account_payload(account, include_user: true, include_live: true, include_statistics: false, surface: :profile))
     end
 
     private
@@ -639,19 +639,42 @@ module ::LiveMetrics
           blocked_users: audience_users_payload(account.blocked_user_ids, exclude_staff: true),
           max_users_per_list: ::LiveMetrics::ProviderAccount::MAX_AUDIENCE_USERS,
         }
+        payload[:owner_status] = owner_status_payload(account, live)
       end
 
       payload[:user] = user_payload(account.user) if include_user
 
-      if include_statistics && account.pulsoid? && SiteSetting.live_metrics_statistics_enabled && account.scopes_list.include?(::LiveMetrics::PulsoidClient::STATISTICS_SCOPE)
-        payload[:statistics] = {
-          "24h" => ::LiveMetrics::PulsoidClient.statistics(account, time_range: "24h"),
-          "7d" => ::LiveMetrics::PulsoidClient.statistics(account, time_range: "7d"),
-          "30d" => ::LiveMetrics::PulsoidClient.statistics(account, time_range: "30d")
-        }
-      end
-
       payload
+    end
+
+    def owner_status_payload(account, live)
+      return nil unless account.pulsoid?
+
+      code = account.last_error.to_s
+      code = "no_data" if code.blank? && live&.dig(:status).to_s == "no_data"
+      code = "provider_unavailable" if code.blank? && live&.dig(:status).to_s == "unavailable"
+      return nil if code.blank?
+
+      message =
+        case code
+        when "subscription_required"
+          "Pulsoid subscription required. Check your Pulsoid plan."
+        when "scope_required"
+          "Pulsoid permission is incomplete. Reconnect your account."
+        when "reconnect_required", "unauthorized"
+          "Pulsoid authorization expired. Reconnect your account."
+        when "reconnecting"
+          "#{provider_label(account.provider)} is reconnecting."
+        when "no_data"
+          "No heart-rate signal from #{provider_label(account.provider)}."
+        when "provider_unavailable"
+          "#{provider_label(account.provider)} is temporarily unavailable."
+        else
+          nil
+        end
+      return nil if message.blank?
+
+      { code: code, message: message }
     end
 
     def live_payload(account)

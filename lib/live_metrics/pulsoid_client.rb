@@ -3,11 +3,13 @@
 require "json"
 require "net/http"
 require "openssl"
+require "timeout"
 require "uri"
 
 module ::LiveMetrics
   class PulsoidClient
     DEFAULT_SCOPES = %w[data:heart_rate:read]
+    REQUIRED_SCOPE = "data:heart_rate:read"
     STATISTICS_SCOPE = "data:statistics:read"
     USER_AGENT = "Discourse Heartrate Pulsoid/0.1"
     MAX_RESPONSE_BYTES = 1_048_576
@@ -33,6 +35,7 @@ module ::LiveMetrics
     class Unauthorized < Error; end
     class NoHeartRateData < Error; end
     class StaleCredentials < Error; end
+    class ValidationError < Error; end
 
     PROVIDER_ERROR_CLASSIFICATIONS = {
       "7005" => :authorization_failed,
@@ -60,7 +63,7 @@ module ::LiveMetrics
         SiteSetting.live_metrics_pulsoid_token_url,
         SiteSetting.live_metrics_pulsoid_revoke_url,
         SiteSetting.live_metrics_pulsoid_latest_url,
-        SiteSetting.live_metrics_pulsoid_profile_url,
+        SiteSetting.live_metrics_pulsoid_validate_token_url,
       ]
       provider_urls << SiteSetting.live_metrics_pulsoid_statistics_url if SiteSetting.live_metrics_statistics_enabled
       provider_urls.all? { |url| ::LiveMetrics::ProviderTransport.valid_pulsoid_https_url?(url) }
@@ -132,15 +135,114 @@ module ::LiveMetrics
       token_payload
     end
 
-    def self.revoke(account)
+    def self.validate_token!(token)
+      token = token.to_s
+      unless valid_bearer_token?(token)
+        raise ValidationError.new(
+          "Pulsoid token validation failed.",
+          classification: :authorization_failed,
+        )
+      end
+
+      response = get_bearer_json(
+        SiteSetting.live_metrics_pulsoid_validate_token_url,
+        token: token,
+      )
+      client_id = response["client_id"].to_s
+      expires_in = response["expires_in"].to_i
+      validated_scopes = normalize_validated_scopes(response["scopes"])
+
+      unless secure_equal?(client_id, SiteSetting.live_metrics_pulsoid_client_id.to_s)
+        raise ValidationError.new(
+          "Pulsoid token belongs to another OAuth client.",
+          classification: :configuration_error,
+        )
+      end
+
+      unless validated_scopes.include?(REQUIRED_SCOPE)
+        raise ValidationError.new(
+          "Pulsoid token is missing the required permission.",
+          classification: :scope_required,
+        )
+      end
+
+      unless expires_in.positive?
+        raise ValidationError.new(
+          "Pulsoid token validation returned an invalid expiration.",
+          classification: :provider_unavailable,
+        )
+      end
+
+      {
+        "client_id" => client_id,
+        "expires_in" => expires_in,
+        "scopes" => validated_scopes,
+      }
+    end
+
+    def self.validate_token_payload!(payload)
+      token_expires_in = payload["expires_in"].to_i
+      unless token_expires_in.positive?
+        raise ValidationError.new(
+          "Pulsoid token response returned an invalid expiration.",
+          classification: :provider_unavailable,
+        )
+      end
+
+      validation = validate_token!(payload["access_token"])
+      {
+        "expires_in" => [token_expires_in, validation.fetch("expires_in").to_i].min,
+        "scopes" => validation.fetch("scopes"),
+      }
+    end
+
+    def self.revoke(account, time_budget_seconds: 5)
       token = account.access_token
       return false if token.blank?
 
-      post_form(SiteSetting.live_metrics_pulsoid_revoke_url, token: token)
-      true
-    rescue => e
-      ::LiveMetrics::SafeLog.warn("pulsoid_revoke_failed", error: e, user_id: account.user_id)
-      false
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + time_budget_seconds.to_f
+      attempts = 0
+      refreshed = false
+
+      loop do
+        attempts += 1
+        response = within_deadline(deadline) do |remaining|
+          post_form(
+            SiteSetting.live_metrics_pulsoid_revoke_url,
+            { token: token },
+            open_timeout: [remaining, 2.0].min,
+            read_timeout: [remaining, 2.0].min,
+          )
+        end
+        return true if response.code.to_i == 200
+
+        error = error_for_response(status: response.code.to_i, body: response.body)
+        if !refreshed && error.classification == :token_expired && attempts < 2
+          snapshot = within_deadline(deadline) do
+            ::LiveMetrics::PulsoidTokenManager.snapshot(account, force_refresh: true)
+          end
+          token = snapshot.access_token
+          refreshed = true
+          next
+        end
+
+        if transient_error?(error) && attempts < 2 && before_deadline?(deadline)
+          next
+        end
+
+        raise error
+      rescue => e
+        if transient_error?(e) && attempts < 2 && before_deadline?(deadline)
+          next
+        end
+
+        ::LiveMetrics::SafeLog.warn(
+          "pulsoid_revoke_failed",
+          error: e,
+          user_id: account.user_id,
+        )
+        return false
+      end
     end
 
     # Performs one uncached provider request. Background refresh jobs use this
@@ -255,11 +357,13 @@ module ::LiveMetrics
       nil
     end
 
-    def self.apply_token_payload!(account, payload)
+    def self.apply_token_payload!(account, payload, expires_in: nil, validated_scopes: nil)
       account.access_token = payload.fetch("access_token")
       account.refresh_token = payload.fetch("refresh_token")
-      account.token_expires_at = Time.zone.now + payload.fetch("expires_in").to_i.seconds
-      account.scopes = scopes_from_token_payload(payload).join(" ")
+      effective_expires_in = expires_in.presence || payload.fetch("expires_in").to_i
+      account.token_expires_at = Time.zone.now + effective_expires_in.to_i.seconds
+      effective_scopes = validated_scopes.presence || scopes_from_token_payload(payload)
+      account.scopes = effective_scopes.map(&:to_s).map(&:strip).reject(&:blank?).uniq.join(" ")
       account.last_error = nil
       account
     end
@@ -396,6 +500,26 @@ module ::LiveMetrics
       parse_json(response.body)
     end
 
+    def self.get_bearer_json(url, token:)
+      uri = ::LiveMetrics::ProviderTransport.pulsoid_https_uri!(url)
+      request = Net::HTTP::Get.new(uri)
+      request["Accept"] = "application/json"
+      request["Authorization"] = "Bearer #{token}"
+      request["User-Agent"] = USER_AGENT
+
+      response = perform(uri, request)
+      raise error_for_response(status: response.code.to_i, body: response.body) unless response.is_a?(Net::HTTPSuccess)
+
+      parsed = parse_json(response.body)
+      unless parsed.is_a?(Hash)
+        raise ValidationError.new(
+          "Pulsoid token validation returned an invalid response.",
+          classification: :provider_unavailable,
+        )
+      end
+      parsed
+    end
+
 
     def self.extract_provider_error_code(parsed)
       return nil unless parsed.is_a?(Hash)
@@ -439,7 +563,16 @@ module ::LiveMetrics
       end
     end
 
-    def self.post_form(url, params)
+    def self.post_form(
+      url,
+      params = nil,
+      open_timeout: 8,
+      read_timeout: 10,
+      **keyword_params
+    )
+      params = keyword_params if params.nil?
+      raise ArgumentError, "Pulsoid form parameters must be a hash" unless params.is_a?(Hash)
+
       uri = ::LiveMetrics::ProviderTransport.pulsoid_https_uri!(url)
       request = Net::HTTP::Post.new(uri)
       request["Content-Type"] = "application/x-www-form-urlencoded"
@@ -447,16 +580,59 @@ module ::LiveMetrics
       request["User-Agent"] = USER_AGENT
       request.body = URI.encode_www_form(params)
 
-      perform(uri, request)
+      perform(
+        uri,
+        request,
+        open_timeout: open_timeout,
+        read_timeout: read_timeout,
+      )
     end
 
-    def self.perform(uri, request)
+    def self.valid_bearer_token?(token)
+      token.present? && token.ascii_only? && !token.match?(/[\x00-\x20\x7F]/)
+    end
+
+    def self.normalize_validated_scopes(raw_scopes)
+      values = raw_scopes.is_a?(Array) ? raw_scopes : [raw_scopes]
+      values.flat_map { |value| value.to_s.split(/[\s,]+/) }.map(&:strip).reject(&:blank?).uniq
+    end
+
+    def self.secure_equal?(left, right)
+      left = left.to_s
+      right = right.to_s
+      return false if left.blank? || right.blank? || left.bytesize != right.bytesize
+
+      ActiveSupport::SecurityUtils.secure_compare(left, right)
+    end
+
+    def self.transient_error?(error)
+      return true if error.is_a?(Timeout::Error)
+      return true if error.is_a?(EOFError)
+      return true if error.is_a?(SocketError)
+      return true if error.is_a?(SystemCallError)
+      return false unless error.respond_to?(:classification)
+
+      %i[provider_unavailable rate_limited].include?(error.classification.to_sym)
+    end
+
+    def self.before_deadline?(deadline)
+      Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline.to_f
+    end
+
+    def self.within_deadline(deadline)
+      remaining = deadline.to_f - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      raise Timeout::Error, "Pulsoid operation exceeded its time budget" unless remaining.positive?
+
+      Timeout.timeout(remaining) { yield(remaining) }
+    end
+
+    def self.perform(uri, request, open_timeout: 8, read_timeout: 10)
       uri = ::LiveMetrics::ProviderTransport.pulsoid_https_uri!(uri.to_s)
       http = Net::HTTP.new(uri.hostname, uri.port)
       http.use_ssl = true
       http.verify_mode = OpenSSL::SSL::VERIFY_PEER
-      http.open_timeout = 8
-      http.read_timeout = 10
+      http.open_timeout = open_timeout
+      http.read_timeout = read_timeout
       response = http.start { |client| client.request(request) }
       ensure_response_size!(response)
       response

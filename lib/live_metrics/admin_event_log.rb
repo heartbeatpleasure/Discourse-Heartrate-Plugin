@@ -30,12 +30,15 @@ module ::LiveMetrics
       redirected
       success
       disconnected
+      revoke_failed
       recovered
       sharing_denied
       not_configured
       state_mismatch
       provider_error
       missing_authorization_code
+      token_validation_failed
+      client_mismatch
       database_not_ready
       connect_failed
       disconnect_failed

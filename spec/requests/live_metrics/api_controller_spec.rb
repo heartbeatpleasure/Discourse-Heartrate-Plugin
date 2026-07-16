@@ -313,4 +313,83 @@ RSpec.describe "LiveMetrics API", type: :request do
     expect(account.reload.blocked_user_ids).not_to include(admin.id)
   end
 
+  context "with an active Pulsoid account" do
+    fab!(:pulsoid_account) do
+      created = LiveMetrics::ProviderAccount.new(
+        user: user,
+        provider: LiveMetrics::ProviderAccount::PROVIDER_PULSOID,
+        display_name: "Pulsoid account",
+        visibility: "logged_in",
+        active: false,
+        show_on_profile: true,
+        show_on_user_card: true,
+        show_in_directory: true,
+        scopes: "data:heart_rate:read data:statistics:read",
+      )
+      created.access_token = "pulsoid-access"
+      created.refresh_token = "pulsoid-refresh"
+      created.token_expires_at = 1.hour.from_now
+      created.save!
+      created
+    end
+
+    before do
+      SiteSetting.live_metrics_pulsoid_enabled = true
+      account.update!(active: false)
+      pulsoid_account.activate!
+      LiveMetrics::RefreshCoordinator.stop(pulsoid_account)
+    end
+
+    after do
+      LiveMetrics::RefreshCoordinator.stop(pulsoid_account)
+      LiveMetrics::CurrentStateStore.delete(pulsoid_account)
+    end
+
+    it "returns detailed Pulsoid status only to the account owner" do
+      pulsoid_account.update!(last_error: "scope_required")
+
+      get "/live-metrics/api/me"
+      expect(response.status).to eq(200)
+      expect(response.parsed_body.dig("account", "owner_status")).to eq(
+        "code" => "scope_required",
+        "message" => "Pulsoid permission is incomplete. Reconnect your account.",
+      )
+
+      sign_in(viewer)
+      get "/live-metrics/api/users/#{user.username}"
+      expect(response.status).to eq(200)
+      expect(response.parsed_body.dig("account", "owner_status")).to be_nil
+      expect(response.body).not_to include("scope_required")
+    end
+
+    it "maps no-data state to a private owner status without exposing it publicly" do
+      LiveMetrics::CurrentStateStore.delete(pulsoid_account)
+
+      get "/live-metrics/api/live-preview"
+      expect(response.status).to eq(200)
+      expect(response.parsed_body.dig("account", "owner_status", "code")).to eq("no_data")
+      expect(response.parsed_body.dig("account", "owner_status", "message")).to eq(
+        "No heart-rate signal from Pulsoid.",
+      )
+    end
+
+    it "never performs Pulsoid statistics requests for profile payloads" do
+      SiteSetting.live_metrics_statistics_enabled = true
+      LiveMetrics::PulsoidClient.expects(:statistics).never
+      LiveMetrics::PulsoidClient.expects(:latest).never
+      LiveMetrics::PulsoidClient.expects(:fetch_latest).never
+      LiveMetrics::CurrentStateStore.write(
+        pulsoid_account,
+        status: "live",
+        heart_rate: 88,
+        measured_at_ms: (Time.zone.now.to_f * 1000).to_i,
+      )
+
+      get "/live-metrics/api/users/#{user.username}"
+
+      expect(response.status).to eq(200)
+      expect(response.parsed_body.dig("account", "statistics")).to be_nil
+    end
+  end
+
 end

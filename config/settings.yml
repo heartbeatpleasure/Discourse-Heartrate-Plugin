@@ -110,6 +110,11 @@ plugins:
     type: string
     client: false
 
+  live_metrics_pulsoid_validate_token_url:
+    default: "https://dev.pulsoid.net/api/v1/token/validate"
+    type: string
+    client: false
+
   live_metrics_pulsoid_revoke_url:
     default: "https://dev.pulsoid.net/oauth2/revoke"
     type: string

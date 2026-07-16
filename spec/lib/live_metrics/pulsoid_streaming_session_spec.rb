@@ -184,4 +184,38 @@ RSpec.describe LiveMetrics::PulsoidStreamingSession do
     expect(state[:status]).to eq("unauthorized")
     expect(state[:heart_rate]).to be_nil
   end
+  it "stores only private owner-facing status codes for transient provider failures" do
+    session = described_class.new(
+      database: "default",
+      account_id: account.id,
+      fingerprint: "fingerprint",
+    )
+    expect(LiveMetrics::PulsoidStreamingRegistry.activate_session(account, session.token)).to eq(true)
+    snapshot = LiveMetrics::PulsoidTokenManager.snapshot(account)
+    error = LiveMetrics::PulsoidStreamingClient::ProviderError.new(
+      "safe",
+      status: 503,
+      classification: :provider_unavailable,
+    )
+
+    session.send(:handle_error, error, snapshot, 0)
+
+    expect(account.reload.last_error).to eq("provider_unavailable")
+  end
+
+  it "clears a private owner status after a valid reading resumes" do
+    account.update!(last_error: "reconnecting")
+    session = described_class.new(
+      database: "default",
+      account_id: account.id,
+      fingerprint: "fingerprint",
+    )
+    expect(LiveMetrics::PulsoidStreamingRegistry.activate_session(account, session.token)).to eq(true)
+    snapshot = LiveMetrics::PulsoidTokenManager.snapshot(account)
+
+    session.send(:sync_last_error, snapshot, nil)
+
+    expect(account.reload.last_error).to be_nil
+  end
+
 end
