@@ -162,8 +162,8 @@ RSpec.describe LiveMetrics::HypeRateClient do
       .times(3)
       .returns(
         { event: "phx_reply", ref: "1", payload: { status: "ok", response: {} } }.to_json,
-        { topic: "phoenix", event: "heartbeat", payload: {}, ref: nil }.to_json,
-        { topic: "phoenix", event: "heartbeat", payload: {}, ref: nil }.to_json,
+        { topic: "phoenix", event: "phx_reply", payload: { status: "ok", response: {} }, ref: 0 }.to_json,
+        { topic: "phoenix", event: "phx_reply", payload: { status: "ok", response: {} }, ref: 0 }.to_json,
       )
 
     described_class.stream_from_uri(
@@ -226,11 +226,82 @@ RSpec.describe LiveMetrics::HypeRateClient do
     expect(described_class.read_message(memory_socket(bytes), 100.0)).to eq(message)
   end
 
-  it "builds the documented HypeRate heartbeat payload" do
+  it "builds the documented HypeRate Phoenix heartbeat payload" do
     payload = JSON.parse(described_class.heartbeat_message)
 
-    expect(payload["event"]).to eq("ping")
-    expect(payload.dig("payload", "timestamp")).to be_a(Integer)
+    expect(payload).to eq(
+      "topic" => "phoenix",
+      "event" => "heartbeat",
+      "payload" => {},
+      "ref" => 0,
+    )
+    expect(described_class::HEARTBEAT_INTERVAL_SECONDS).to eq(10)
+  end
+
+  it "reconnects when HypeRate closes the joined heart-rate channel" do
+    socket = stub(close: nil)
+    candidate = { name: "test", uri: URI.parse("wss://example.test/ws/device") }
+
+    described_class.stubs(:open_socket).returns(socket)
+    described_class.stubs(:send_text_frame)
+    described_class.stubs(:monotonic_now).returns(0.0)
+    described_class
+      .expects(:read_message)
+      .twice
+      .returns(
+        {
+          topic: "hr:device",
+          event: "phx_reply",
+          ref: "1",
+          payload: { status: "ok", response: {} },
+        }.to_json,
+        { topic: "hr:device", event: "phx_close", payload: {}, ref: nil }.to_json,
+      )
+
+    expect do
+      described_class.stream_from_uri(
+        "device",
+        candidate,
+        stop_if: -> { false },
+        on_reading: ->(_payload) {},
+      )
+    end.to raise_error(
+      LiveMetrics::HypeRateClient::NoHeartRateData,
+      /closed the heart-rate channel/,
+    )
+  end
+
+  it "reconnects when the joined heart-rate channel reports a Phoenix error" do
+    socket = stub(close: nil)
+    candidate = { name: "test", uri: URI.parse("wss://example.test/ws/device") }
+
+    described_class.stubs(:open_socket).returns(socket)
+    described_class.stubs(:send_text_frame)
+    described_class.stubs(:monotonic_now).returns(0.0)
+    described_class
+      .expects(:read_message)
+      .twice
+      .returns(
+        {
+          topic: "hr:device",
+          event: "phx_reply",
+          ref: "1",
+          payload: { status: "ok", response: {} },
+        }.to_json,
+        { topic: "hr:device", event: "phx_error", payload: {}, ref: nil }.to_json,
+      )
+
+    expect do
+      described_class.stream_from_uri(
+        "device",
+        candidate,
+        stop_if: -> { false },
+        on_reading: ->(_payload) {},
+      )
+    end.to raise_error(
+      LiveMetrics::HypeRateClient::NoHeartRateData,
+      /closed the heart-rate channel/,
+    )
   end
 
   it "builds the official device-path WebSocket URL" do

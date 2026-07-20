@@ -24,7 +24,7 @@ module ::LiveMetrics
     MAX_READ_TIMEOUT_SECONDS = 30
     MAX_CONNECT_TIMEOUT_SECONDS = 10
     CONNECTION_TIMEOUT_GRACE_SECONDS = 3
-    HEARTBEAT_INTERVAL_SECONDS = 15
+    HEARTBEAT_INTERVAL_SECONDS = 10
     DEFAULT_STREAM_STALL_TIMEOUT_SECONDS = 45
     JOIN_TIMEOUT_SECONDS = 10
     MAX_MESSAGE_BYTES = 1_048_576
@@ -263,6 +263,13 @@ module ::LiveMetrics
 
         payload = parse_json(message)
         event = payload["event"].to_s
+        topic = payload["topic"].to_s
+
+        if %w[phx_close phx_error].include?(event) && topic == "hr:#{device_id}"
+          raise NoHeartRateData.new(
+            "HypeRate closed the heart-rate channel; reconnecting the stream.",
+          )
+        end
 
         if event == "phx_reply" && payload["ref"].to_s == "1"
           status = payload.dig("payload", "status").to_s
@@ -559,8 +566,10 @@ module ::LiveMetrics
 
     def self.heartbeat_message
       {
-        event: "ping",
-        payload: { timestamp: (Time.now.to_f * 1000).to_i },
+        topic: "phoenix",
+        event: "heartbeat",
+        payload: {},
+        ref: 0,
       }.to_json
     end
 
