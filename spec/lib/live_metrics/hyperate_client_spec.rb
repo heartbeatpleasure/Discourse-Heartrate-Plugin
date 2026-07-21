@@ -148,7 +148,7 @@ RSpec.describe LiveMetrics::HypeRateClient do
     expect(described_class.stream_stall_timeout_seconds).to eq(120)
   end
 
-  it "does not treat heart-rate silence as a stall while WebSocket frames continue" do
+  it "keeps short heart-rate silence open while WebSocket frames continue" do
     socket = stub(close: nil)
     candidate = { name: "test", uri: URI.parse("wss://example.test/ws/device") }
     stop = false
@@ -226,8 +226,24 @@ RSpec.describe LiveMetrics::HypeRateClient do
     expect(described_class.read_message(memory_socket(bytes), 100.0)).to eq(message)
   end
 
-  it "builds the documented HypeRate Phoenix heartbeat payload" do
-    payload = JSON.parse(described_class.heartbeat_message)
+  it "uses the device-path ping keepalive for the current HypeRate endpoint" do
+    candidate = {
+      name: "device_path",
+      uri: URI.parse("wss://app.hyperate.io/ws/device"),
+    }
+    payload = JSON.parse(described_class.heartbeat_message(candidate))
+
+    expect(payload["event"]).to eq("ping")
+    expect(payload.dig("payload", "timestamp")).to be_a(Integer)
+    expect(described_class.heartbeat_interval_seconds(candidate)).to eq(15)
+  end
+
+  it "uses the Phoenix heartbeat for the legacy HypeRate socket" do
+    candidate = {
+      name: "phoenix_socket",
+      uri: URI.parse("wss://app.hyperate.io/socket/websocket"),
+    }
+    payload = JSON.parse(described_class.heartbeat_message(candidate))
 
     expect(payload).to eq(
       "topic" => "phoenix",
@@ -235,7 +251,46 @@ RSpec.describe LiveMetrics::HypeRateClient do
       "payload" => {},
       "ref" => 0,
     )
-    expect(described_class::HEARTBEAT_INTERVAL_SECONDS).to eq(10)
+    expect(described_class.heartbeat_interval_seconds(candidate)).to eq(10)
+  end
+
+  it "refreshes a joined subscription after prolonged absence of valid readings" do
+    socket = stub(close: nil)
+    candidate = { name: "device_path", uri: URI.parse("wss://example.test/ws/device") }
+
+    described_class.stubs(:open_socket).returns(socket)
+    described_class.stubs(:send_text_frame)
+    described_class.stubs(:reading_recovery_interval_seconds).returns(10)
+    described_class.stubs(:monotonic_now).returns(0.0, 0.0, 1.0, 11.0)
+    read_sequence = sequence("joined subscription becomes inactive")
+    described_class
+      .expects(:read_message)
+      .in_sequence(read_sequence)
+      .returns(
+        { event: "phx_reply", ref: "1", payload: { status: "ok", response: {} } }.to_json,
+      )
+    described_class
+      .expects(:read_message)
+      .in_sequence(read_sequence)
+      .raises(Timeout::Error)
+
+    expect do
+      described_class.stream_from_uri(
+        "device",
+        candidate,
+        stop_if: -> { false },
+        on_reading: ->(_payload) {},
+      )
+    end.to raise_error(
+      LiveMetrics::HypeRateClient::ReadingRecoveryDue,
+      /refreshing the subscription/,
+    )
+  end
+
+  it "does not turn a reading-recovery refresh into an endpoint fallback" do
+    error = LiveMetrics::HypeRateClient::ReadingRecoveryDue.new("refresh")
+
+    expect(described_class.fallback_allowed_for?(error)).to eq(false)
   end
 
   it "reconnects when HypeRate closes the joined heart-rate channel" do

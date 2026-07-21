@@ -155,6 +155,7 @@ module ::LiveMetrics
     def run
       with_database do
         reconnect_attempt = 0
+        suppress_next_join_event = false
 
         until stop_requested?
           break unless session_current?
@@ -171,7 +172,8 @@ module ::LiveMetrics
               stop_if: -> { stop_requested? || !session_current? },
               on_socket: ->(socket) { set_socket(socket) },
               on_connected: lambda do
-                record_connected
+                record_connected(log_event: !suppress_next_join_event)
+                suppress_next_join_event = false
                 registry.touch_session(account_id, token)
               end,
               on_heartbeat: -> { registry.touch_session(account_id, token) },
@@ -217,6 +219,15 @@ module ::LiveMetrics
               account_id: account_id,
             )
             sleep_interruptibly(reconnect_delay(reconnect_attempt))
+          rescue ::LiveMetrics::HypeRateClient::ReadingRecoveryDue
+            # This is an expected, low-frequency subscription refresh. Keep it in
+            # health counters without filling the bounded admin event log overnight.
+            set_status(:reconnecting)
+            record_reconnect(reason: :no_data, log_event: false)
+            write_error_state("no_data")
+            reconnect_attempt = 0
+            suppress_next_join_event = true
+            sleep_interruptibly(1)
           rescue ::LiveMetrics::HypeRateClient::NoHeartRateData => e
             set_status(:reconnecting)
             record_reconnect(reason: :no_data)
@@ -329,7 +340,7 @@ module ::LiveMetrics
       clear_active_connections
     end
 
-    def record_connected
+    def record_connected(log_event: true)
       joined_at_ms = current_time_ms
       recovered = false
       @mutex.synchronize do
@@ -339,10 +350,12 @@ module ::LiveMetrics
         @last_successful_join_at_ms = joined_at_ms
       end
 
-      record_stream_event(
-        event: "stream_join",
-        result: recovered ? "recovered" : "success",
-      )
+      if log_event
+        record_stream_event(
+          event: "stream_join",
+          result: recovered ? "recovered" : "success",
+        )
+      end
     end
 
     def record_frame_received
@@ -362,7 +375,7 @@ module ::LiveMetrics
       end
     end
 
-    def record_reconnect(reason: :unknown, stalled: false)
+    def record_reconnect(reason: :unknown, stalled: false, log_event: true)
       reconnect_at_ms = current_time_ms
       normalized_reason = registry.sanitize_reconnect_reason(reason)
 
@@ -376,11 +389,13 @@ module ::LiveMetrics
         end
       end
 
-      record_stream_event(
-        event: "stream_reconnect",
-        result: normalized_reason,
-        severity: reconnect_severity(normalized_reason),
-      )
+      if log_event
+        record_stream_event(
+          event: "stream_reconnect",
+          result: normalized_reason,
+          severity: reconnect_severity(normalized_reason),
+        )
+      end
     end
 
     def record_retry_reason(reason)

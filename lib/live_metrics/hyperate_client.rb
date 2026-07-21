@@ -24,7 +24,15 @@ module ::LiveMetrics
     MAX_READ_TIMEOUT_SECONDS = 30
     MAX_CONNECT_TIMEOUT_SECONDS = 10
     CONNECTION_TIMEOUT_GRACE_SECONDS = 3
-    HEARTBEAT_INTERVAL_SECONDS = 10
+    # HypeRate's current /ws/:deviceId endpoint uses its JSON ping envelope,
+    # while the legacy Phoenix socket uses the documented Phoenix heartbeat.
+    DEVICE_PATH_HEARTBEAT_INTERVAL_SECONDS = 15
+    PHOENIX_HEARTBEAT_INTERVAL_SECONDS = 10
+
+    # A HypeRate subscription can keep returning transport/heartbeat frames while
+    # no longer resuming valid readings after a long device-side interruption.
+    # Refresh it conservatively instead of reconnecting on normal short silence.
+    READING_RECOVERY_INTERVAL_SECONDS = 300
     DEFAULT_STREAM_STALL_TIMEOUT_SECONDS = 45
     JOIN_TIMEOUT_SECONDS = 10
     MAX_MESSAGE_BYTES = 1_048_576
@@ -45,6 +53,7 @@ module ::LiveMetrics
 
     class Unauthorized < Error; end
     class NoHeartRateData < Error; end
+    class ReadingRecoveryDue < NoHeartRateData; end
     class StreamStalled < NoHeartRateData; end
 
     # Preserves WebSocket bytes that arrive in the same packet as the HTTP 101
@@ -220,7 +229,9 @@ module ::LiveMetrics
 
       connected_at = monotonic_now
       last_frame_at = connected_at
-      next_heartbeat = connected_at + HEARTBEAT_INTERVAL_SECONDS
+      heartbeat_interval = heartbeat_interval_seconds(candidate)
+      next_heartbeat = connected_at + heartbeat_interval
+      reading_recovery_deadline = connected_at + reading_recovery_interval_seconds
       transport_timeout = stream_stall_timeout_seconds
       join_deadline = connected_at + JOIN_TIMEOUT_SECONDS
       joined = false
@@ -230,15 +241,18 @@ module ::LiveMetrics
         transport_deadline = last_frame_at + transport_timeout
 
         raise StreamStalled.new(stream_stalled_message(transport_timeout)) if now >= transport_deadline
+        if now >= reading_recovery_deadline
+          raise ReadingRecoveryDue.new(reading_recovery_message)
+        end
         raise Error.new("HypeRate channel join timed out.") if !joined && now >= join_deadline
 
         if now >= next_heartbeat
-          send_text_frame(socket, heartbeat_message)
+          send_text_frame(socket, heartbeat_message(candidate))
           on_heartbeat&.call
-          next_heartbeat = now + HEARTBEAT_INTERVAL_SECONDS
+          next_heartbeat = now + heartbeat_interval
         end
 
-        deadlines = [next_heartbeat, transport_deadline]
+        deadlines = [next_heartbeat, transport_deadline, reading_recovery_deadline]
         deadlines << join_deadline unless joined
         read_deadline = deadlines.min
 
@@ -255,6 +269,9 @@ module ::LiveMetrics
         rescue Timeout::Error
           now = monotonic_now
           raise StreamStalled.new(stream_stalled_message(transport_timeout)) if now >= transport_deadline
+          if now >= reading_recovery_deadline
+            raise ReadingRecoveryDue.new(reading_recovery_message)
+          end
           raise Error.new("HypeRate channel join timed out.") if !joined && now >= join_deadline
 
           next
@@ -302,6 +319,7 @@ module ::LiveMetrics
         heart_rate = payload.dig("payload", "hr")
         next unless valid_heart_rate?(heart_rate)
 
+        reading_recovery_deadline = monotonic_now + reading_recovery_interval_seconds
         on_reading.call(normalize_latest_response(heart_rate))
       end
 
@@ -540,6 +558,7 @@ module ::LiveMetrics
     end
 
     def self.fallback_allowed_for?(error)
+      return false if error.is_a?(ReadingRecoveryDue)
       return true if error.is_a?(Unauthorized) && [401, 403].include?(error.status.to_i)
       return true if error.is_a?(Error) && error.status.to_i != 101
 
@@ -564,13 +583,43 @@ module ::LiveMetrics
       }.to_json
     end
 
-    def self.heartbeat_message
-      {
-        topic: "phoenix",
-        event: "heartbeat",
-        payload: {},
-        ref: 0,
-      }.to_json
+    def self.heartbeat_interval_seconds(candidate = nil)
+      if phoenix_candidate?(candidate)
+        PHOENIX_HEARTBEAT_INTERVAL_SECONDS
+      else
+        DEVICE_PATH_HEARTBEAT_INTERVAL_SECONDS
+      end
+    end
+
+    def self.heartbeat_message(candidate = nil)
+      if phoenix_candidate?(candidate)
+        {
+          topic: "phoenix",
+          event: "heartbeat",
+          payload: {},
+          ref: 0,
+        }.to_json
+      else
+        {
+          event: "ping",
+          payload: { timestamp: (Time.now.to_f * 1000).to_i },
+        }.to_json
+      end
+    end
+
+    def self.phoenix_candidate?(candidate)
+      return false if candidate.blank?
+      return true if candidate[:name].to_s == "phoenix_socket"
+
+      phoenix_socket_base?(candidate[:uri].to_s)
+    end
+
+    def self.reading_recovery_interval_seconds
+      READING_RECOVERY_INTERVAL_SECONDS
+    end
+
+    def self.reading_recovery_message
+      "No valid HypeRate reading was received for #{reading_recovery_interval_seconds} seconds; refreshing the subscription."
     end
 
     def self.read_http_response(socket)

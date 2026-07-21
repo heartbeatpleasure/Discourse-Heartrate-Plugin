@@ -44,4 +44,19 @@ RSpec.describe LiveMetrics::HypeRateStreamingSession do
     expect(session.last_frame_age_seconds).to eq(3)
     expect(session.last_event_age_seconds).to eq(1)
   end
+
+  it "tracks expected no-reading recovery without filling the admin event log" do
+    session = described_class.new(database: "default", account_id: 1, fingerprint: "fingerprint")
+    session.stubs(:current_time_ms).returns(4_000, 5_000)
+    LiveMetrics::AdminEventLog.expects(:record).never
+
+    session.send(:record_reconnect, reason: :no_data, log_event: false)
+    session.send(:record_connected, log_event: false)
+
+    expect(session.reconnect_count).to eq(1)
+    expect(session.last_reconnect_reason).to eq("no_data")
+    expect(session.connected?).to eq(true)
+    expect(session.last_successful_join_at_ms).to eq(5_000)
+  end
+
 end
