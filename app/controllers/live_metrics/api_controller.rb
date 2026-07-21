@@ -14,6 +14,7 @@ module ::LiveMetrics
       "update_me" => :settings_mutation,
       "update_account" => :settings_mutation,
       "activate_account" => :settings_mutation,
+      "reconnect_account" => :provider_reconnect,
       "directory" => :directory,
       "badge_status" => :badge_status,
       "user_cards" => :user_cards,
@@ -24,11 +25,11 @@ module ::LiveMetrics
     skip_before_action :check_xhr, raise: false
 
     before_action :ensure_enabled
-    before_action :ensure_logged_in, only: %i[me live_preview update_me update_account activate_account connect_hyperate disconnect_hyperate user_search add_audience_user remove_audience_user]
+    before_action :ensure_logged_in, only: %i[me live_preview update_me update_account activate_account reconnect_account connect_hyperate disconnect_hyperate user_search add_audience_user remove_audience_user]
     before_action :ensure_logged_in, only: %i[plugin_config directory badge_status], if: -> { SiteSetting.live_metrics_require_login_to_view_page }
     before_action :enforce_request_rate_limit, only: RATE_LIMIT_ACTIONS.keys.map(&:to_sym)
     before_action :ensure_can_view, only: %i[plugin_config me live_preview directory badge_status user_cards user]
-    before_action :ensure_can_share, only: %i[update_me update_account activate_account connect_hyperate user_search add_audience_user remove_audience_user]
+    before_action :ensure_can_share, only: %i[update_me update_account activate_account reconnect_account connect_hyperate user_search add_audience_user remove_audience_user]
 
     # NOTE: do not name this action `config`; ActionController already has
     # a `config` method and Discourse plugin controllers can fail hard when
@@ -202,6 +203,57 @@ module ::LiveMetrics
     rescue => e
       ::LiveMetrics::SafeLog.warn("activate_provider_failed", error: e, user_id: current_user&.id, provider: normalize_provider(params[:provider]) || "unknown")
       live_metrics_render_error("activate_failed", status: 422, message: "The active provider could not be changed.")
+    end
+
+    def reconnect_account
+      return live_metrics_render_error("database_not_ready", status: 503, message: database_not_ready_message) unless provider_accounts_table_ready?
+
+      provider = normalize_provider(params[:provider])
+      return live_metrics_render_error("invalid_provider", status: 422, message: "Choose a valid heartrate provider.") if provider.blank?
+      return live_metrics_render_error("provider_disabled", status: 404, message: "This provider is currently disabled.") unless ::LiveMetrics.enabled_provider_names.include?(provider)
+
+      account = current_provider_account(provider)
+      return live_metrics_render_error("not_connected", status: 404, message: "Connect this provider before reconnecting it.") if account.blank? || !account.connected?
+      return live_metrics_render_error("provider_not_active", status: 422, message: "Make this provider active before reconnecting it.") unless account.active?
+      unless ::LiveMetrics::RefreshCoordinator.async_enabled?
+        return live_metrics_render_error(
+          "reconnect_unavailable",
+          status: 422,
+          message: "Manual reconnect is unavailable while background heartrate readings are disabled.",
+        )
+      end
+
+      restarted = ::LiveMetrics::RefreshCoordinator.restart(account)
+      unless restarted
+        return live_metrics_render_error(
+          "reconnect_failed",
+          status: 503,
+          message: "The provider connection could not be restarted. Please try again.",
+        )
+      end
+
+      ::LiveMetrics::AdminEventLog.record(
+        provider: provider,
+        event: "stream_reconnect",
+        result: "success",
+        severity: "info",
+        client_context: ::LiveMetrics::AdminEventLog.client_context_for(request),
+      )
+
+      payload = current_user_payload(include_live: false, include_statistics: false)
+      live_metrics_render_json(payload.merge(reconnected: true, provider: provider))
+    rescue => e
+      ::LiveMetrics::SafeLog.warn(
+        "manual_provider_reconnect_failed",
+        error: e,
+        user_id: current_user&.id,
+        provider: normalize_provider(params[:provider]) || "unknown",
+      )
+      live_metrics_render_error(
+        "reconnect_failed",
+        status: 503,
+        message: "The provider connection could not be restarted. Please try again.",
+      )
     end
 
     def connect_hyperate
@@ -512,14 +564,16 @@ module ::LiveMetrics
           configured: ::LiveMetrics::PulsoidClient.configured?,
           connect_url: "/live-metrics/api/connect/pulsoid",
           connect_type: "oauth",
-          label: "Pulsoid"
+          label: "Pulsoid",
+          reconnect_supported: ::LiveMetrics::RefreshCoordinator.async_enabled?,
         },
         hyperate: {
           enabled: SiteSetting.live_metrics_hyperate_enabled,
           configured: ::LiveMetrics::HypeRateClient.configured?,
           connect_url: "/live-metrics/api/connect/hyperate",
           connect_type: "device_id",
-          label: "HypeRate"
+          label: "HypeRate",
+          reconnect_supported: ::LiveMetrics::RefreshCoordinator.async_enabled?,
         }
       }
     end

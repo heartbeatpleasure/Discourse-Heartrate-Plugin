@@ -98,6 +98,19 @@ RSpec.describe LiveMetrics::RefreshCoordinator do
   ensure
     described_class.release_fetch_lock(account, lock_token) if lock_token
   end
+
+  it "reports a streaming restart request as accepted and invalidates the old owner" do
+    SiteSetting.live_metrics_hyperate_streaming_enabled = true
+    LiveMetrics::HypeRateStreamingRegistry.activate_session(account, "old-owner")
+
+    result = described_class.restart(account)
+
+    expect(result).to eq(true)
+    expect(
+      LiveMetrics::HypeRateStreamingRegistry.session_current?(account, "old-owner"),
+    ).to eq(false)
+  end
+
   it "moves HypeRate out of Sidekiq while streaming mode is enabled" do
     SiteSetting.live_metrics_hyperate_streaming_enabled = true
     described_class.expects(:enqueue_refresh).never

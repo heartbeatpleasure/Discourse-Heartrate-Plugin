@@ -39,4 +39,26 @@ RSpec.describe LiveMetrics::RequestRateLimiter do
 
     described_class.perform!(:badge_status, user: nil, request: stub(remote_ip: "192.0.2.10"))
   end
+
+  it "throttles manual provider reconnects to one request every 30 seconds" do
+    limiter = mock
+    limiter.expects(:performed!).returns(true)
+    RateLimiter
+      .expects(:new)
+      .with(
+        user,
+        "live_metrics_provider_reconnect",
+        1,
+        30.seconds,
+        error_code: "live_metrics_provider_reconnect_limit",
+        apply_limit_to_staff: true,
+      )
+      .returns(limiter)
+
+    described_class.perform!(
+      :provider_reconnect,
+      user: user,
+      request: stub(remote_ip: "192.0.2.10"),
+    )
+  end
 end

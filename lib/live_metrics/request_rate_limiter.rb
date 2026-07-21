@@ -8,6 +8,7 @@ module ::LiveMetrics
       user_search: { max: 60, seconds: 1.minute },
       provider_connect: { max: 12, seconds: 5.minutes },
       provider_disconnect: { max: 12, seconds: 5.minutes },
+      provider_reconnect: { max: 1, seconds: 30.seconds },
       audience_mutation: { max: 60, seconds: 1.minute },
       settings_mutation: { max: 60, seconds: 1.minute },
       directory: { max: 180, seconds: 1.minute },

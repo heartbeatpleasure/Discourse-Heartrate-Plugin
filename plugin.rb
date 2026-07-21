@@ -172,6 +172,7 @@ after_initialize do
     patch "/live-metrics/api/accounts/:provider/settings" => "live_metrics/api#update_account", defaults: { format: :json }
     put "/live-metrics/api/accounts/:provider/activate" => "live_metrics/api#activate_account", defaults: { format: :json }
     patch "/live-metrics/api/accounts/:provider/activate" => "live_metrics/api#activate_account", defaults: { format: :json }
+    put "/live-metrics/api/accounts/:provider/reconnect" => "live_metrics/api#reconnect_account", defaults: { format: :json }
     get "/live-metrics/api/live-preview" => "live_metrics/api#live_preview", defaults: { format: :json }
     get "/live-metrics/api/directory" => "live_metrics/api#directory", defaults: { format: :json }
     get "/live-metrics/api/status" => "live_metrics/api#badge_status", defaults: { format: :json }

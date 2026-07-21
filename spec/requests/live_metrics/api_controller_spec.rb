@@ -144,6 +144,44 @@ RSpec.describe "LiveMetrics API", type: :request do
     )
   end
 
+  it "restarts the active HypeRate connection without deleting its account" do
+    LiveMetrics::RefreshCoordinator
+      .expects(:restart)
+      .with { |candidate| candidate.id == account.id }
+      .returns(true)
+
+    put "/live-metrics/api/accounts/hyperate/reconnect"
+
+    expect(response.status).to eq(200)
+    expect(response.parsed_body["reconnected"]).to eq(true)
+    expect(response.parsed_body["provider"]).to eq("hyperate")
+    expect(account.reload.provider_uid).to eq("test-device")
+    expect(response.parsed_body.dig("account", "active")).to eq(true)
+  end
+
+  it "does not reconnect an inactive provider" do
+    account.update!(active: false)
+    LiveMetrics::RefreshCoordinator.expects(:restart).never
+
+    put "/live-metrics/api/accounts/hyperate/reconnect"
+
+    expect(response.status).to eq(422)
+    expect(response.parsed_body["error"]).to eq("provider_not_active")
+  end
+
+  it "hides manual reconnect when background readings are disabled" do
+    SiteSetting.live_metrics_async_current_readings_enabled = false
+    LiveMetrics::RefreshCoordinator.expects(:restart).never
+
+    get "/live-metrics/api/config"
+    expect(response.status).to eq(200)
+    expect(response.parsed_body.dig("providers", "hyperate", "reconnect_supported")).to eq(false)
+
+    put "/live-metrics/api/accounts/hyperate/reconnect"
+    expect(response.status).to eq(422)
+    expect(response.parsed_body["error"]).to eq("reconnect_unavailable")
+  end
+
   it "serves user-card readings from the batched current-state store" do
     account.update!(show_on_user_card: true, visibility: "logged_in")
     LiveMetrics::CurrentStateStore.write(
@@ -343,6 +381,23 @@ RSpec.describe "LiveMetrics API", type: :request do
     after do
       LiveMetrics::RefreshCoordinator.stop(pulsoid_account)
       LiveMetrics::CurrentStateStore.delete(pulsoid_account)
+    end
+
+    it "restarts the active Pulsoid connection without removing OAuth credentials" do
+      access_cipher = pulsoid_account.access_token_cipher
+      refresh_cipher = pulsoid_account.refresh_token_cipher
+      LiveMetrics::RefreshCoordinator
+        .expects(:restart)
+        .with { |candidate| candidate.id == pulsoid_account.id }
+        .returns(true)
+
+      put "/live-metrics/api/accounts/pulsoid/reconnect"
+
+      expect(response.status).to eq(200)
+      expect(response.parsed_body["reconnected"]).to eq(true)
+      expect(response.parsed_body["provider"]).to eq("pulsoid")
+      expect(pulsoid_account.reload.access_token_cipher).to eq(access_cipher)
+      expect(pulsoid_account.refresh_token_cipher).to eq(refresh_cipher)
     end
 
     it "returns detailed Pulsoid status only to the account owner" do

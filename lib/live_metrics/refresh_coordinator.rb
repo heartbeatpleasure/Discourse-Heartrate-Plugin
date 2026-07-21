@@ -135,9 +135,10 @@ module ::LiveMetrics
         if any_streaming_eligible?(account)
           # Invalidating the provider-specific session token makes the collector
           # close and replace the socket without allowing the old connection to
-          # write another reading after a credential or provider change.
-          stop(account, clear_state: true, clear_fetch_lock: false)
-          return nil
+          # write another reading after a credential or provider change. Return
+          # the stop result so user-triggered reconnects can report whether the
+          # restart request was accepted without waiting for the new socket.
+          return stop(account, clear_state: true, clear_fetch_lock: false)
         end
 
         # Invalidate the old generation and remove its state immediately, but do
