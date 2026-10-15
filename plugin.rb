@@ -53,6 +53,7 @@ after_initialize do
   require_relative "lib/live_metrics/hyperate_client"
 
   require_dependency File.expand_path("app/models/live_metrics/provider_account.rb", __dir__)
+  require_dependency File.expand_path("app/models/live_metrics/activity.rb", __dir__)
   require_relative "lib/live_metrics/current_state_store"
   require_relative "lib/live_metrics/pulsoid_token_manager"
   require_relative "lib/live_metrics/user_lifecycle_cleanup"
@@ -78,11 +79,16 @@ after_initialize do
     "app/jobs/scheduled/live_metrics/recover_refresh_loops.rb",
     __dir__,
   )
+  require_dependency File.expand_path(
+    "app/jobs/scheduled/live_metrics/clear_expired_activities.rb",
+    __dir__,
+  )
   require_dependency File.expand_path("app/controllers/live_metrics/page_controller.rb", __dir__)
   require_dependency File.expand_path("app/controllers/live_metrics/auth_controller.rb", __dir__)
   require_dependency File.expand_path("app/controllers/live_metrics/api_controller.rb", __dir__)
   require_dependency File.expand_path("app/controllers/live_metrics/admin_health_controller.rb", __dir__)
   require_dependency File.expand_path("app/controllers/live_metrics/admin_logs_controller.rb", __dir__)
+  require_dependency File.expand_path("app/controllers/live_metrics/admin_activities_controller.rb", __dir__)
 
   ::LiveMetrics::Permissions.enforce_visibility_options!
 
@@ -141,6 +147,9 @@ after_initialize do
     get "/admin/plugins/live-metrics/health" => "live_metrics/admin_health#index",
         defaults: { format: :json },
         constraints: AdminConstraint.new
+    delete "/admin/plugins/live-metrics/activities/:username" => "live_metrics/admin_activities#destroy",
+        defaults: { format: :json },
+        constraints: AdminConstraint.new
     get "/admin/plugins/live-metrics/logs" => "live_metrics/admin_logs#index",
         defaults: { format: :json },
         constraints: AdminConstraint.new
@@ -163,6 +172,8 @@ after_initialize do
 
     get "/live-metrics/api/config" => "live_metrics/api#plugin_config", defaults: { format: :json }
     get "/live-metrics/api/me" => "live_metrics/api#me", defaults: { format: :json }
+    put "/live-metrics/api/me/activity" => "live_metrics/api#update_activity", defaults: { format: :json }
+    delete "/live-metrics/api/me/activity" => "live_metrics/api#clear_activity", defaults: { format: :json }
     get "/live-metrics/api/user-search" => "live_metrics/api#user_search", defaults: { format: :json }
     put "/live-metrics/api/accounts/:provider/audience-users" => "live_metrics/api#add_audience_user", defaults: { format: :json }
     delete "/live-metrics/api/accounts/:provider/audience-users" => "live_metrics/api#remove_audience_user", defaults: { format: :json }

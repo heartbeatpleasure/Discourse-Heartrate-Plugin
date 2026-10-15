@@ -15,6 +15,9 @@ module ::LiveMetrics
       def purge_user!(user_or_id, reason: "unknown")
         user_id = user_id_for(user_or_id)
         return empty_result(success: false) if user_id.blank?
+        # Activities are user-owned, not provider-owned; purge even if an account
+        # no longer has a connected provider.
+        ::LiveMetrics::Activity.where(user_id: user_id).delete_all if ::LiveMetrics::Activity.table_exists?
         return empty_result(success: true) unless provider_accounts_table_ready?
 
         account_ids = provider_account_ids(user_id)

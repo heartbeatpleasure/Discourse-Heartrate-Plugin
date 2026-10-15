@@ -1,5 +1,6 @@
 import RouteTemplate from "ember-route-template";
 import { i18n } from "discourse-i18n";
+import LiveMetricsActivityModeration from "../../components/live-metrics-activity-moderation";
 
 export default RouteTemplate(
   <template>
@@ -248,6 +249,7 @@ export default RouteTemplate(
           </span>
         </a>
       </section>
+      <LiveMetricsActivityModeration />
     </div>
   </template>
 );

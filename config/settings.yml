@@ -31,6 +31,56 @@ plugins:
     type: list
     client: false
 
+  live_metrics_activity_enabled:
+    default: true
+    client: false
+  live_metrics_activity_predefined_enabled:
+    default: true
+    client: false
+  live_metrics_activity_custom_enabled:
+    default: true
+    client: false
+  live_metrics_activity_details_enabled:
+    default: true
+    client: false
+  live_metrics_activity_options:
+    default: "Resting|Lying down|Sleeping|Taking a nap|Meditating|Working|Traveling|Walking|Leisurely cycling|Exercising|Doing chores|Eating|Gaming|Watching TV / a movie|Cuddling|NSFW"
+    type: list
+    client: false
+  live_metrics_activity_max_text_length:
+    default: 40
+    type: integer
+    min: 10
+    max: 80
+    client: false
+  live_metrics_activity_expiry_mode:
+    default: "user_selectable"
+    type: enum
+    choices:
+      - disabled
+      - fixed
+      - user_selectable
+    client: false
+  live_metrics_activity_allow_no_expiry:
+    default: false
+    client: false
+  live_metrics_activity_default_duration_minutes:
+    default: 240
+    type: integer
+    min: 30
+    max: 1440
+    client: false
+  live_metrics_activity_fixed_duration_minutes:
+    default: 240
+    type: integer
+    min: 30
+    max: 1440
+    client: false
+  live_metrics_activity_duration_overrides:
+    default: "Sleeping:480|Taking a nap:60|Working:480|Traveling:240|Walking:120|Leisurely cycling:120|Exercising:180|Resting:120|Lying down:120|Meditating:120|Doing chores:120|Eating:60|Gaming:240|Watching TV / a movie:180|Cuddling:120|NSFW:120"
+    type: list
+    client: false
+
   live_metrics_directory_enabled:
     default: true
     client: true

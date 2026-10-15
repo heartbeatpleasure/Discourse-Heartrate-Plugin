@@ -13,6 +13,8 @@ module ::LiveMetrics
       "remove_audience_user" => :audience_mutation,
       "update_me" => :settings_mutation,
       "update_account" => :settings_mutation,
+      "update_activity" => :settings_mutation,
+      "clear_activity" => :settings_mutation,
       "activate_account" => :settings_mutation,
       "reconnect_account" => :provider_reconnect,
       "directory" => :directory,
@@ -25,11 +27,11 @@ module ::LiveMetrics
     skip_before_action :check_xhr, raise: false
 
     before_action :ensure_enabled
-    before_action :ensure_logged_in, only: %i[me live_preview update_me update_account activate_account reconnect_account connect_hyperate disconnect_hyperate user_search add_audience_user remove_audience_user]
+    before_action :ensure_logged_in, only: %i[me live_preview update_me update_account activate_account reconnect_account connect_hyperate disconnect_hyperate user_search add_audience_user remove_audience_user update_activity clear_activity]
     before_action :ensure_logged_in, only: %i[plugin_config directory badge_status], if: -> { SiteSetting.live_metrics_require_login_to_view_page }
     before_action :enforce_request_rate_limit, only: RATE_LIMIT_ACTIONS.keys.map(&:to_sym)
     before_action :ensure_can_view, only: %i[plugin_config me live_preview directory badge_status user_cards user]
-    before_action :ensure_can_share, only: %i[update_me update_account activate_account reconnect_account connect_hyperate user_search add_audience_user remove_audience_user]
+    before_action :ensure_can_share, only: %i[update_me update_account activate_account reconnect_account connect_hyperate user_search add_audience_user remove_audience_user update_activity clear_activity]
 
     # NOTE: do not name this action `config`; ActionController already has
     # a `config` method and Discourse plugin controllers can fail hard when
@@ -44,6 +46,7 @@ module ::LiveMetrics
         poll_interval_seconds: SiteSetting.live_metrics_poll_interval_seconds.to_i,
         providers: provider_config_payload,
         visibility_options: visibility_options,
+        activities: ::LiveMetrics::Activity.config,
         permissions: {
           can_view: ::LiveMetrics::Permissions.can_view?(guardian),
           can_share: ::LiveMetrics::Permissions.can_share?(guardian)
@@ -58,6 +61,43 @@ module ::LiveMetrics
       live_metrics_render_json(current_user_payload(include_live: false, include_statistics: false))
     end
 
+
+    def update_activity
+      return live_metrics_render_error("activity_disabled", status: 403) unless ::LiveMetrics::Activity.enabled?
+      return live_metrics_render_error("not_connected", status: 422) unless active_current_account&.connected?
+      return live_metrics_render_error("database_not_ready", status: 503) unless ::LiveMetrics::Activity.table_exists?
+
+      custom = params[:custom].to_s == "true"
+      label = params[:label].to_s.strip
+      if custom
+        return live_metrics_render_error("custom_activity_disabled", status: 422) unless SiteSetting.live_metrics_activity_custom_enabled
+        label = ::LiveMetrics::Activity.normalize_text(params[:text], required: true)
+        details = nil
+      else
+        unless ::LiveMetrics::Activity.options.include?(label)
+          return live_metrics_render_error("invalid_activity", status: 422, message: "Choose a valid activity.")
+        end
+        details =
+          if SiteSetting.live_metrics_activity_details_enabled
+            ::LiveMetrics::Activity.normalize_text(params[:details])
+          else
+            nil
+          end
+      end
+
+      expires_at = ::LiveMetrics::Activity.expiry_for(label, params[:duration_minutes])
+      activity = ::LiveMetrics::Activity.find_or_initialize_by(user_id: current_user.id)
+      activity.assign_attributes(activity_name: label, details: details, is_custom: custom, expires_at: expires_at, duration_minutes: expires_at ? ((expires_at - Time.zone.now) / 60).round : 0)
+      activity.save!
+      live_metrics_render_json(activity: activity.public_payload)
+    rescue ArgumentError => e
+      live_metrics_render_error("invalid_activity", status: 422, message: e.message)
+    end
+
+    def clear_activity
+      ::LiveMetrics::Activity.where(user_id: current_user.id).delete_all if ::LiveMetrics::Activity.table_exists?
+      live_metrics_render_json(activity: nil)
+    end
 
     def user_search
       query = params[:q].to_s.strip
@@ -417,7 +457,9 @@ module ::LiveMetrics
         return live_metrics_render_json(users: [], generated_at: Time.zone.now.iso8601, database_ready: false)
       end
 
-      rows = visible_live_directory_entries.map do |account, live|
+      visible_entries = visible_live_directory_entries
+      activities = ::LiveMetrics::Activity.active_for_users(visible_entries.map { |account, _| account.user_id })
+      rows = visible_entries.map do |account, live|
         account_payload(
           account,
           include_user: true,
@@ -425,6 +467,7 @@ module ::LiveMetrics
           include_statistics: false,
           surface: :directory,
           live_override: live,
+          activity_override: activities[account.user_id],
         )
       end
 
@@ -469,6 +512,7 @@ module ::LiveMetrics
           (directory_usernames.include?(username_lower) && can_view_account?(account, surface: :directory))
       end
       live_by_account_id = live_payloads_for(visible_accounts)
+      activities_by_user_id = ::LiveMetrics::Activity.active_for_users(visible_accounts.map(&:user_id))
       readings = []
       append_user_card_readings!(
         readings,
@@ -476,6 +520,7 @@ module ::LiveMetrics
         users_by_username,
         accounts_by_user_id,
         live_by_account_id,
+        activities_by_user_id,
         :user_card,
       )
       append_user_card_readings!(
@@ -484,6 +529,7 @@ module ::LiveMetrics
         users_by_username,
         accounts_by_user_id,
         live_by_account_id,
+        activities_by_user_id,
         :directory,
       )
 
@@ -619,7 +665,8 @@ module ::LiveMetrics
         user: user_payload(current_user),
         account: active_account,
         active_provider: active_account&.dig(:provider),
-        accounts: accounts
+        accounts: accounts,
+        activity: ::LiveMetrics::Activity.current_for(current_user)&.public_payload,
       }
     end
 
@@ -666,7 +713,8 @@ module ::LiveMetrics
       include_live:,
       include_statistics:,
       surface:,
-      live_override: LIVE_PAYLOAD_UNSET
+      live_override: LIVE_PAYLOAD_UNSET,
+      activity_override: LIVE_PAYLOAD_UNSET
     )
       live =
         if include_live
@@ -684,6 +732,7 @@ module ::LiveMetrics
         show_in_directory: account.show_in_directory,
         live: live,
         status_label: status_label(live),
+        activity: activity_for_payload(account, live, surface, activity_override),
         profile: public_profile_payload(account)
       }
 
@@ -699,6 +748,18 @@ module ::LiveMetrics
       payload[:user] = user_payload(account.user) if include_user
 
       payload
+    end
+
+    def activity_for_payload(account, live, surface, override)
+      return nil unless ::LiveMetrics::Activity.enabled?
+      if surface == :self
+        return ::LiveMetrics::Activity.current_for(current_user)&.public_payload
+      end
+      return nil unless live&.dig(:status) == "live" && live[:heart_rate].to_i.positive?
+
+      return override unless override.equal?(LIVE_PAYLOAD_UNSET)
+
+      ::LiveMetrics::Activity.active_for_users([account.user_id])[account.user_id]
     end
 
     def owner_status_payload(account, live)
@@ -1013,6 +1074,7 @@ module ::LiveMetrics
       users_by_username,
       accounts_by_user_id,
       live_by_account_id,
+      activities_by_user_id,
       surface
     )
       usernames.each do |username_lower|
@@ -1026,11 +1088,11 @@ module ::LiveMetrics
         next unless directory_live_payload?(live)
         next unless live[:heart_rate].to_i.positive?
 
-        rows << user_card_live_payload(user, live, surface)
+        rows << user_card_live_payload(user, live, surface, activities_by_user_id[user.id])
       end
     end
 
-    def user_card_live_payload(user, live, surface)
+    def user_card_live_payload(user, live, surface, activity = nil)
       measured_at_ms = live[:measured_at_ms].to_i
       if measured_at_ms <= 0 && live[:measured_at].present?
         parsed_measured_at = Time.zone.parse(live[:measured_at].to_s)
@@ -1052,7 +1114,8 @@ module ::LiveMetrics
         measured_at: live[:measured_at],
         measured_at_ms: measured_at_ms.positive? ? measured_at_ms : nil,
         age_seconds: live[:age_seconds],
-        expires_at_ms: expires_at_ms
+        expires_at_ms: expires_at_ms,
+        activity: activity,
       }
     rescue ArgumentError, TypeError, NoMethodError
       {
@@ -1062,7 +1125,8 @@ module ::LiveMetrics
         measured_at: live[:measured_at],
         measured_at_ms: live[:measured_at_ms],
         age_seconds: live[:age_seconds],
-        expires_at_ms: nil
+        expires_at_ms: nil,
+        activity: activity,
       }
     end
 
